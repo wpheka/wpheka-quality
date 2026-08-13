@@ -1,0 +1,22 @@
+project_type: wordpress-theme
+
+php:
+  minimum: "7.4"
+
+wordpress:
+  required: true
+
+checks:
+  php_syntax: true
+  git_diff_check: true
+  phpcs: true
+  phpstan: true
+  phpunit: true
+  composer_validate: true
+  composer_audit: true
+  semgrep: true
+  gitleaks: true
+  plugin_check: false
+  coderabbit: true
+  npm_lint: false
+  npm_test: false

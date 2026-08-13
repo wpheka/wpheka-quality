@@ -1,0 +1,68 @@
+# WPHEKA Quality repository configuration.
+# Copy to .wpheka-quality.yml in the repository you want reviewed.
+# Every key is optional; anything omitted falls back to the profile or default.
+
+project_type: woocommerce-plugin
+
+php:
+  minimum: "8.1"
+
+wordpress:
+  required: true
+
+woocommerce:
+  required: true
+  hpos: true
+  blocks: true
+
+# Enable or disable individual checks. `npm` sets both npm_lint and npm_test;
+# `diff_check` is an alias for git_diff_check. An unknown name is reported as a
+# warning rather than silently ignored.
+checks:
+  php_syntax: true
+  git_diff_check: true
+  phpcs: true
+  phpstan: true
+  phpunit: true
+  composer_validate: true
+  composer_audit: true
+  semgrep: true
+  gitleaks: true
+  plugin_check: true
+  npm: false          # opt-in: runs scripts this repository authored
+  coderabbit: true
+
+# Paths excluded from file-level checks. Vendored and generated code is already
+# excluded by default; list anything else here.
+exclude:
+  - vendor/
+  - node_modules/
+  - dist/
+  - build/
+
+# Per-check wall-clock limits in seconds. A check that exceeds its limit is
+# terminated and recorded as TIMEOUT, which is not the same as PASS.
+timeouts:
+  default: 900
+  semgrep: 1800
+  phpunit: 1800
+  coderabbit: 1800
+
+# Exit non-zero when any check reports this status or worse.
+#   none | error (default) | warning
+fail_on: error
+
+# Custom command lines. These run VERBATIM — the engine appends no flags.
+#
+# SECURITY: a commands: block in this file is ignored unless the run passes
+# --allow-repo-commands, because a reviewed repository is untrusted input.
+# See docs/security-notes.md.
+#
+# $WPHEKA_RAW_DIR points at the run's tool-results directory. Write your JSON
+# report there to keep structured findings working.
+commands:
+  phpcs: "vendor/bin/phpcs -q --report-full --report-json=$WPHEKA_RAW_DIR/phpcs.json ."
+  phpstan: "vendor/bin/phpstan analyse --no-progress --error-format=json > $WPHEKA_RAW_DIR/phpstan.json"
+  phpunit: "vendor/bin/phpunit --log-junit $WPHEKA_RAW_DIR/phpunit-junit.xml"
+
+# Never put secrets in this file. It is committed and read by tooling.

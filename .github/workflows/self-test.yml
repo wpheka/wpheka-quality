@@ -1,0 +1,66 @@
+# Tests the engine itself. For using the engine on your own plugin, see docs/ci.md.
+name: Self test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS pins bash 3.2 and an older python3; the engine claims to work
+        # on both, so both get tested.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          tools: composer
+          coverage: none
+
+      - name: Install WordPress coding standards
+        run: |
+          # Composer 2.2+ blocks plugins unless explicitly allowed, and the
+          # codesniffer installer is what registers WPCS with phpcs.
+          composer global config --no-plugins \
+            allow-plugins.dealerdirect/phpcodesniffer-composer-installer true
+          composer global require --no-interaction --no-progress \
+            squizlabs/php_codesniffer \
+            wp-coding-standards/wpcs \
+            dealerdirect/phpcodesniffer-composer-installer
+          echo "$(composer global config bin-dir --absolute)" >> "$GITHUB_PATH"
+
+      - name: Verify the WordPress standard registered
+        run: |
+          phpcs -i
+          phpcs -i | grep -q WordPress
+
+      - name: Report the toolchain under test
+        run: bin/wpheka-quality --doctor
+
+      - name: Run the test suite
+        run: python3 tests/test_runner.py
+
+      - name: Audit the sample fixture end to end
+        run: |
+          bin/wpheka-quality \
+            --repo tests/fixtures/sample-plugin \
+            --output-dir "${{ runner.temp }}/fixture-report" \
+            --no-color
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: fixture-report-${{ matrix.os }}
+          path: ${{ runner.temp }}/fixture-report/
+          if-no-files-found: ignore

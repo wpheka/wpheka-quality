@@ -1,0 +1,1098 @@
+#!/usr/bin/env bash
+#
+# WPHEKA Quality — deterministic review engine for WordPress/WooCommerce repos.
+#
+# Targets bash 3.2 (the macOS system shell), so no associative arrays, no
+# `mapfile`, and no reliance on GNU coreutils being installed.
+#
+set -u
+set -o pipefail
+
+# Resolve symlinks so the script still finds its siblings when invoked through
+# a link on PATH. macOS has no `readlink -f`, so walk the chain manually.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  LINK_TARGET="$(readlink "$SELF")"
+  case "$LINK_TARGET" in
+    /*) SELF="$LINK_TARGET" ;;
+    *)  SELF="$(cd "$(dirname "$SELF")" && pwd)/$LINK_TARGET" ;;
+  esac
+done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+if [[ -r "$ROOT/VERSION" ]]; then
+  VERSION="$(tr -d ' \t\n\r' < "$ROOT/VERSION")"
+else
+  VERSION="unknown"
+fi
+
+REPO="$(pwd)"
+CONFIG_FILE=""
+PROFILE=""
+FORMAT="text"
+OUTPUT_DIR=""
+COLOR=1
+QUIET=0
+DRY_RUN=0
+LIST_CHECKS=0
+DOCTOR=0
+ALLOW_REPO_COMMANDS=0
+FAIL_ON=""
+FAIL_ON_SEVERITY="critical"
+BASELINE=""
+WRITE_BASELINE=0
+ONLY_CHECKS=""
+SKIP_CHECKS=""
+JOBS=""
+
+ALL_CHECKS="php_syntax git_diff_check phpcs phpstan phpunit composer_validate composer_audit semgrep gitleaks plugin_check npm_lint npm_test coderabbit"
+
+[[ -t 1 ]] || COLOR=0
+
+usage() {
+  cat <<EOF
+WPHEKA Quality v${VERSION}
+Review-first quality and AI-review engine for WordPress and WooCommerce repositories.
+
+Usage:
+  wpheka-quality [options]
+
+Options:
+  --repo PATH             Target repository (default: current working directory)
+  --config FILE           Explicit config file. Trusted: its commands: block is honoured
+  --profile NAME          Profile preset: $(cd "$ROOT/config/profiles" 2>/dev/null && ls *.yml 2>/dev/null | sed 's/\.yml//' | tr '\n' ' ')
+  --format FORMAT         Terminal output: text, json, html (default: text)
+  --output-dir PATH       Report directory (default: REPO/.wpheka-quality-reports/<stamp>)
+  --only LIST             Comma-separated checks to run exclusively
+  --skip LIST             Comma-separated checks to skip
+  --fail-on LEVEL         Exit non-zero on check status: none, error, warning (default: error)
+  --fail-on-severity SEV  Also exit non-zero when a finding is at least this
+                          severe: critical, high, medium, low, none (default: critical)
+  --baseline FILE         Suppress findings recorded in this baseline file
+  --write-baseline        Write the run's findings to --baseline and exit 0
+  --jobs N                Parallelism for file-level checks (default: CPU count)
+  --allow-repo-commands   Honour a commands: block in the target repo's own config
+  --list-checks           Print the resolved check plan and exit
+  --dry-run               Resolve config and print the plan without running tools
+  --doctor                Report which check tools are installed, and how to add the rest
+  --no-color              Disable ANSI colour
+  --quiet                 Suppress per-check terminal output
+  -v, --version           Print version and exit
+  -h, --help              Show this help and exit
+
+Checks: ${ALL_CHECKS}
+
+Environment overrides:
+  WPHEKA_CODERABBIT_MODE=uncommitted|base    WPHEKA_CODERABBIT_BASE=<ref>
+  WPHEKA_PHPCS_STANDARD=<ruleset>            WPHEKA_TIMEOUT_DEFAULT=<seconds>
+
+Security: a commands: block found inside the target repository is ignored unless
+--allow-repo-commands is passed, because a reviewed repository is untrusted input.
+See docs/security-notes.md.
+EOF
+}
+
+die() {
+  echo "wpheka-quality: $1" >&2
+  exit "${2:-2}"
+}
+
+need_arg() {
+  # $1 = flag name, $2 = number of remaining args
+  [[ "$2" -ge 2 ]] || die "option $1 requires a value"
+}
+
+# Normalise --flag=value into --flag value so both spellings work.
+ARGV=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --*=*) ARGV+=("${1%%=*}" "${1#*=}") ;;
+    *)     ARGV+=("$1") ;;
+  esac
+  shift
+done
+set -- ${ARGV[@]+"${ARGV[@]}"}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) need_arg "$1" $#; REPO="$2"; shift 2 ;;
+    --config) need_arg "$1" $#; CONFIG_FILE="$2"; shift 2 ;;
+    --profile) need_arg "$1" $#; PROFILE="$2"; shift 2 ;;
+    --format) need_arg "$1" $#; FORMAT="$2"; shift 2 ;;
+    --output-dir) need_arg "$1" $#; OUTPUT_DIR="$2"; shift 2 ;;
+    --only) need_arg "$1" $#; ONLY_CHECKS="$2"; shift 2 ;;
+    --skip) need_arg "$1" $#; SKIP_CHECKS="$2"; shift 2 ;;
+    --fail-on) need_arg "$1" $#; FAIL_ON="$2"; shift 2 ;;
+    --fail-on-severity) need_arg "$1" $#; FAIL_ON_SEVERITY="$(echo "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
+    --baseline) need_arg "$1" $#; BASELINE="$2"; shift 2 ;;
+    --jobs) need_arg "$1" $#; JOBS="$2"; shift 2 ;;
+    --write-baseline) WRITE_BASELINE=1; shift ;;
+    --allow-repo-commands) ALLOW_REPO_COMMANDS=1; shift ;;
+    --list-checks) LIST_CHECKS=1; shift ;;
+    --doctor) DOCTOR=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --no-color) COLOR=0; shift ;;
+    --quiet) QUIET=1; shift ;;
+    -v|--version) echo "WPHEKA Quality v${VERSION}"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "wpheka-quality: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$FORMAT" in
+  text|json|html) ;;
+  *) die "invalid --format '$FORMAT' (expected text, json or html)" ;;
+esac
+if [[ -n "$FAIL_ON" ]]; then
+  case "$FAIL_ON" in
+    none|error|warning) ;;
+    *) die "invalid --fail-on '$FAIL_ON' (expected none, error or warning)" ;;
+  esac
+fi
+case "$FAIL_ON_SEVERITY" in
+  critical|high|medium|low|none) ;;
+  *) die "invalid --fail-on-severity '$FAIL_ON_SEVERITY' (expected critical, high, medium, low or none)" ;;
+esac
+if [[ -n "$JOBS" && ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  die "--jobs must be a positive integer"
+fi
+if [[ $WRITE_BASELINE -eq 1 && -z "$BASELINE" ]]; then
+  die "--write-baseline requires --baseline FILE"
+fi
+
+[[ -d "$REPO" ]] || die "target repository does not exist: $REPO"
+REPO="$(cd "$REPO" && pwd)" || die "cannot enter target repository: $REPO"
+export WPHEKA_TARGET_REPO="$REPO"
+
+command -v python3 >/dev/null 2>&1 || die "python3 is required but was not found on PATH"
+
+if [[ -z "$JOBS" ]]; then
+  JOBS="$( (sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4) | head -1 )"
+  [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || JOBS=4
+fi
+
+# ---------------------------------------------------------------------------
+# Terminal helpers
+# ---------------------------------------------------------------------------
+if [[ $COLOR -eq 1 ]]; then
+  C_RESET="\033[0m"; C_BOLD="\033[1m"; C_GREEN="\033[32m"; C_RED="\033[31m"
+  C_YELLOW="\033[33m"; C_CYAN="\033[36m"; C_MAGENTA="\033[35m"; C_DIM="\033[2m"
+else
+  C_RESET=""; C_BOLD=""; C_GREEN=""; C_RED=""
+  C_YELLOW=""; C_CYAN=""; C_MAGENTA=""; C_DIM=""
+fi
+
+log_info() {
+  [[ $QUIET -eq 0 ]] && printf "${C_CYAN}==>${C_RESET} ${C_BOLD}%s${C_RESET}\n" "$1"
+  return 0
+}
+
+log_warn() {
+  printf "${C_YELLOW}warning:${C_RESET} %s\n" "$1" >&2
+}
+
+log_result() {
+  local name="$1" status="$2" detail="${3:-}" fmt=""
+  [[ $QUIET -eq 1 ]] && return 0
+  case "$status" in
+    PASS)    fmt="${C_GREEN}${C_BOLD}[PASS]${C_RESET}" ;;
+    FAIL)    fmt="${C_RED}${C_BOLD}[FAIL]${C_RESET}" ;;
+    TIMEOUT) fmt="${C_RED}${C_BOLD}[TIMEOUT]${C_RESET}" ;;
+    ERROR)   fmt="${C_RED}${C_BOLD}[ERROR]${C_RESET}" ;;
+    SKIPPED) fmt="${C_YELLOW}[SKIPPED]${C_RESET}" ;;
+    WARNING) fmt="${C_MAGENTA}[WARNING]${C_RESET}" ;;
+    *)       fmt="${C_CYAN}[${status}]${C_RESET}" ;;
+  esac
+  if [[ -n "$detail" ]]; then
+    printf "  %-22s %b ${C_DIM}%s${C_RESET}\n" "$name" "$fmt" "$detail"
+  else
+    printf "  %-22s %b\n" "$name" "$fmt"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Configuration (loaded without eval: NUL-delimited KEY=VALUE pairs)
+# ---------------------------------------------------------------------------
+CONFIG_LOADER="$ROOT/bin/config-loader.py"
+[[ -f "$CONFIG_LOADER" ]] || die "missing $CONFIG_LOADER"
+
+LOADER_ARGS=(--repo "$REPO" --format env0)
+[[ -n "$CONFIG_FILE" ]] && LOADER_ARGS+=(--config "$CONFIG_FILE")
+[[ -n "$PROFILE" ]] && LOADER_ARGS+=(--profile "$PROFILE")
+[[ $ALLOW_REPO_COMMANDS -eq 1 ]] && LOADER_ARGS+=(--allow-repo-commands)
+
+CFG_TMP="$(mktemp -t wpheka-quality-cfg.XXXXXX)" || die "cannot create temp file"
+cleanup_cfg() { rm -f "$CFG_TMP"; }
+trap cleanup_cfg EXIT
+
+if ! python3 "$CONFIG_LOADER" "${LOADER_ARGS[@]}" > "$CFG_TMP"; then
+  die "configuration could not be loaded"
+fi
+
+# Only names matching the expected pattern are ever exported. The value is used
+# verbatim and never re-parsed by the shell.
+while IFS= read -r -d '' pair; do
+  key="${pair%%=*}"
+  val="${pair#*=}"
+  if [[ "$key" =~ ^WPHEKA_(CHECK|CMD|TIMEOUT|CFG)_[A-Z0-9_]+$ ]]; then
+    export "$key=$val"
+  fi
+done < "$CFG_TMP"
+cleanup_cfg
+trap - EXIT
+
+if [[ -n "${WPHEKA_CFG_WARNINGS:-}" ]]; then
+  while IFS= read -r w; do
+    [[ -n "$w" ]] && log_warn "$w"
+  done <<< "$WPHEKA_CFG_WARNINGS"
+fi
+
+[[ -n "$FAIL_ON" ]] || FAIL_ON="${WPHEKA_CFG_FAIL_ON:-error}"
+
+# --only / --skip refine what the config resolved.
+in_list() {
+  # $1 = needle, $2 = comma-separated haystack
+  case ",$(echo "$2" | tr -d ' '),": in *",$1,"*) return 0 ;; esac
+  return 1
+}
+
+if [[ -n "$ONLY_CHECKS" ]]; then
+  for c in $ALL_CHECKS; do
+    var="WPHEKA_CHECK_$(echo "$c" | tr '[:lower:]' '[:upper:]')"
+    if in_list "$c" "$ONLY_CHECKS"; then export "$var=1"; else export "$var=0"; fi
+  done
+  for requested in $(echo "$ONLY_CHECKS" | tr ',' ' '); do
+    in_list "$requested" "$(echo "$ALL_CHECKS" | tr ' ' ',')" || die "--only: unknown check '$requested'"
+  done
+fi
+if [[ -n "$SKIP_CHECKS" ]]; then
+  for requested in $(echo "$SKIP_CHECKS" | tr ',' ' '); do
+    in_list "$requested" "$(echo "$ALL_CHECKS" | tr ' ' ',')" || die "--skip: unknown check '$requested'"
+    export "WPHEKA_CHECK_$(echo "$requested" | tr '[:lower:]' '[:upper:]')=0"
+  done
+fi
+
+check_enabled() {
+  local var="WPHEKA_CHECK_$(echo "$1" | tr '[:lower:]' '[:upper:]')"
+  [[ "$(eval "printf '%s' \"\${$var:-1}\"")" == "1" ]]
+}
+
+check_command() {
+  local var="WPHEKA_CMD_$(echo "$1" | tr '[:lower:]' '[:upper:]')"
+  eval "printf '%s' \"\${$var:-}\""
+}
+
+timeout_for() {
+  local var="WPHEKA_TIMEOUT_$(echo "$1" | tr '[:lower:]' '[:upper:]')"
+  local secs
+  secs="$(eval "printf '%s' \"\${$var:-}\"")"
+  [[ -n "$secs" ]] || secs="${WPHEKA_TIMEOUT_DEFAULT:-900}"
+  [[ "$secs" =~ ^[1-9][0-9]*$ ]] || secs=900
+  printf '%s' "$secs"
+}
+
+if [[ $DOCTOR -eq 1 ]]; then
+  echo "WPHEKA Quality v${VERSION} — toolchain"
+  echo ""
+  MISSING=0
+
+  # Install hints have to match the platform, or they send Linux users to a
+  # package manager they do not have.
+  if command -v brew >/dev/null 2>&1; then
+    PKG="brew install"
+  elif command -v apt-get >/dev/null 2>&1; then
+    PKG="sudo apt-get install -y"
+  elif command -v dnf >/dev/null 2>&1; then
+    PKG="sudo dnf install -y"
+  elif command -v pacman >/dev/null 2>&1; then
+    PKG="sudo pacman -S"
+  else
+    PKG="<your package manager> install"
+  fi
+
+  # tool : checks it powers : how to install it
+  DOCTOR_ROWS=(
+    "php|php_syntax|$PKG php"
+    "git|git_diff_check, repository_integrity|$PKG git"
+    "python3|report rendering (required)|$PKG python3"
+    "composer|composer_validate, composer_audit|https://getcomposer.org/download/"
+    "phpcs|phpcs|composer global require squizlabs/php_codesniffer wp-coding-standards/wpcs dealerdirect/phpcodesniffer-composer-installer"
+    "phpstan|phpstan|composer global require phpstan/phpstan szepeviktor/phpstan-wordpress php-stubs/wordpress-stubs php-stubs/woocommerce-stubs"
+    "phpunit|phpunit|curl -fsSL -o ~/.local/bin/phpunit https://phar.phpunit.de/phpunit.phar && chmod +x ~/.local/bin/phpunit"
+    "semgrep|semgrep|python3 -m pip install semgrep"
+    "gitleaks|gitleaks|https://github.com/gitleaks/gitleaks/releases"
+    "wp|plugin_check|https://wp-cli.org/#installing"
+    "npm|npm_lint, npm_test|$PKG nodejs"
+    "cr|coderabbit|curl -fsSL https://cli.coderabbit.ai/install.sh | sh"
+  )
+  printf "  %-10s %-8s %s\n" "TOOL" "STATUS" "POWERS"
+  for row in "${DOCTOR_ROWS[@]}"; do
+    tool="${row%%|*}"
+    rest="${row#*|}"
+    powers="${rest%%|*}"
+    if command -v "$tool" >/dev/null 2>&1; then
+      printf "  %-10s ${C_GREEN}%-8s${C_RESET} %s\n" "$tool" "ok" "$powers"
+    else
+      printf "  %-10s ${C_YELLOW}%-8s${C_RESET} %s\n" "$tool" "missing" "$powers"
+      MISSING=$((MISSING + 1))
+    fi
+  done
+
+  if [[ $MISSING -gt 0 ]]; then
+    echo ""
+    echo "Install the missing tools:"
+    for row in "${DOCTOR_ROWS[@]}"; do
+      tool="${row%%|*}"
+      command -v "$tool" >/dev/null 2>&1 || echo "  ${row##*|}"
+    done
+    echo ""
+    echo "Or run: $ROOT/bin/install-tools.sh"
+  fi
+
+  # phpcs without the WordPress ruleset silently reviews against the wrong rules.
+  if command -v phpcs >/dev/null 2>&1; then
+    if ! phpcs -i 2>/dev/null | grep -q "WordPress"; then
+      echo ""
+      log_warn "phpcs is installed but the WordPress standard is not registered."
+      echo "  composer global require wp-coding-standards/wpcs dealerdirect/phpcodesniffer-composer-installer"
+      MISSING=$((MISSING + 1))
+    fi
+  fi
+
+  # plugin-check only exists inside a WordPress installation.
+  if command -v wp >/dev/null 2>&1 && [[ -n "${WPHEKA_WP_PATH:-}" ]]; then
+    if ! wp --path="$WPHEKA_WP_PATH" cli has-command "plugin check" >/dev/null 2>&1; then
+      echo ""
+      log_warn "plugin-check is not active in \$WPHEKA_WP_PATH ($WPHEKA_WP_PATH)."
+      echo "  wp --path=\"\$WPHEKA_WP_PATH\" plugin install plugin-check --activate"
+    fi
+  fi
+
+  echo ""
+  [[ $MISSING -eq 0 ]] && echo "All check tools are available." \
+                       || echo "$MISSING tool(s) missing — those checks will be SKIPPED, not passed."
+  exit 0
+fi
+
+if [[ $LIST_CHECKS -eq 1 || $DRY_RUN -eq 1 ]]; then
+  echo "WPHEKA Quality v${VERSION}"
+  echo "Repository : $REPO"
+  echo "Config     : ${WPHEKA_CFG_CONFIG_FILE:-(none)}"
+  echo "Profile    : ${WPHEKA_CFG_PROFILE:-(none)}"
+  echo "Fail on    : $FAIL_ON"
+  echo "Jobs       : $JOBS"
+  echo "Plan:"
+  for c in $ALL_CHECKS; do
+    if check_enabled "$c"; then
+      override="$(check_command "$c")"
+      if [[ -n "$override" ]]; then
+        printf "  %-18s enabled   (override: %s, timeout %ss)\n" "$c" "$override" "$(timeout_for "$c")"
+      else
+        printf "  %-18s enabled   (timeout %ss)\n" "$c" "$(timeout_for "$c")"
+      fi
+    else
+      printf "  %-18s disabled\n" "$c"
+    fi
+  done
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Run directory
+# ---------------------------------------------------------------------------
+STAMP="$(date '+%Y-%m-%d-%H%M%S')-$$"
+if [[ -n "$OUTPUT_DIR" ]]; then
+  RUN_DIR="$OUTPUT_DIR"
+else
+  RUN_DIR="${REPO}/.wpheka-quality-reports/${STAMP}"
+fi
+RAW="${RUN_DIR}/tool-results"
+mkdir -p "$RAW" || die "cannot create report directory: $RAW"
+RUN_DIR="$(cd "$RUN_DIR" && pwd)"
+RAW="${RUN_DIR}/tool-results"
+RESULTS="${RUN_DIR}/results.tsv"
+: > "$RESULTS" || die "cannot write $RESULTS"
+
+INTERRUPTED=0
+on_interrupt() {
+  INTERRUPTED=1
+  echo "" >&2
+  log_warn "interrupted — writing a partial report to $RUN_DIR"
+  render_reports || true
+  exit 130
+}
+trap on_interrupt INT TERM
+
+# ---------------------------------------------------------------------------
+# Result recording. results.tsv columns:
+#   name <TAB> status <TAB> log-path-or-'-' <TAB> exit-code <TAB> detail
+# ---------------------------------------------------------------------------
+sanitize() {
+  # Collapse anything that would corrupt a TSV row.
+  printf '%s' "$1" | tr '\t\n\r' '   ' | sed 's/  */ /g; s/^ //; s/ $//'
+}
+
+record() {
+  local name="$1" status="$2" path="$3" rc="$4" detail="${5:-}"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$status" "$path" "$rc" "$(sanitize "$detail")" >> "$RESULTS"
+  log_result "$name" "$status" "$detail"
+}
+
+skip() {
+  record "$1" "SKIPPED" "-" "-" "$2"
+}
+
+# ---------------------------------------------------------------------------
+# Timeout-bounded execution. Prefers coreutils `timeout` when present and falls
+# back to a watchdog, so macOS without coreutils still gets bounded runs.
+# ---------------------------------------------------------------------------
+TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="gtimeout"
+fi
+
+# Set by exec_with_timeout to 1 when it actually killed the command.
+#
+# The exit code alone cannot answer this. `timeout` reports a kill as 124, but
+# 124 is also a legitimate exit code for the wrapped command — GNU xargs
+# returns exactly 124 when one of its invocations exits 255, which is what
+# `php -l` does for a parse error. Treating that as a timeout turned a real
+# syntax error into "the check never ran". So corroborate with the clock:
+# a genuine timeout cannot happen before the limit has elapsed.
+WPHEKA_TIMED_OUT=0
+
+exec_with_timeout() {
+  local secs="$1"; shift
+  local started; started="$(date +%s)"
+  WPHEKA_TIMED_OUT=0
+
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    local trc=0
+    "$TIMEOUT_BIN" -k 10 "$secs" "$@" || trc=$?
+    if [[ $trc -eq 124 || $trc -eq 137 || $trc -eq 143 ]]; then
+      [[ $(( $(date +%s) - started )) -ge $secs ]] && WPHEKA_TIMED_OUT=1
+    fi
+    return $trc
+  fi
+
+  "$@" &
+  local pid=$!
+  (
+    waited=0
+    while [ "$waited" -lt "$secs" ]; do
+      sleep 1
+      waited=$((waited + 1))
+      kill -0 "$pid" 2>/dev/null || exit 0
+    done
+    # Reap direct children first so a wrapper shell does not orphan its tool.
+    pkill -TERM -P "$pid" 2>/dev/null
+    kill -TERM "$pid" 2>/dev/null
+    sleep 5
+    pkill -KILL -P "$pid" 2>/dev/null
+    kill -KILL "$pid" 2>/dev/null
+  ) >/dev/null 2>&1 &
+  local watcher=$!
+
+  local rc=0
+  wait "$pid" || rc=$?
+  kill -TERM "$watcher" 2>/dev/null
+  wait "$watcher" 2>/dev/null || true
+
+  # Killed by the watchdog: the signal plus the clock agreeing is a timeout.
+  if [[ $rc -eq 143 || $rc -eq 137 ]]; then
+    if [[ $(( $(date +%s) - started )) -ge $secs ]]; then
+      WPHEKA_TIMED_OUT=1
+      rc=124
+    fi
+  fi
+  return $rc
+}
+
+# run_check NAME COMMAND [PASS_ON_EXIT_CODES]
+#
+# COMMAND runs with the target repository as the working directory. The exit
+# code decides the status, so no check can silently pass on a broken run.
+run_check() {
+  local name="$1" cmd="$2" pass_codes="${3:-0}"
+  local outfile="$RAW/${name}.log"
+  local secs; secs="$(timeout_for "$name")"
+  local started; started="$(date +%s)"
+
+  # A configured command override runs verbatim, so it needs a documented place
+  # to write its machine-readable report if it wants findings extracted.
+  export WPHEKA_RAW_DIR="$RAW"
+  export WPHEKA_CHECK_NAME="$name"
+
+  exec_with_timeout "$secs" bash -c 'cd "$WPHEKA_TARGET_REPO" || exit 127; '"$cmd" \
+    >"$outfile" 2>&1
+  local rc=$?
+  local elapsed=$(( $(date +%s) - started ))
+
+  if [[ $WPHEKA_TIMED_OUT -eq 1 ]]; then
+    record "$name" "TIMEOUT" "$outfile" "$rc" "exceeded ${secs}s"
+    return 0
+  fi
+  if [[ $rc -eq 127 ]]; then
+    record "$name" "ERROR" "$outfile" "$rc" "command or working directory unavailable"
+    return 0
+  fi
+
+  local ok=1
+  for code in $(echo "$pass_codes" | tr ',' ' '); do
+    [[ $rc -eq $code ]] && ok=0
+  done
+
+  if [[ $ok -eq 0 ]]; then
+    record "$name" "PASS" "$outfile" "$rc" "${elapsed}s"
+  else
+    record "$name" "FAIL" "$outfile" "$rc" "exit $rc after ${elapsed}s"
+  fi
+}
+
+render_reports() {
+  local render="$ROOT/bin/render-report.py"
+  [[ -f "$render" ]] || { log_warn "renderer missing: $render"; return 1; }
+  local args=("$RUN_DIR" "$REPO" "$FORMAT" "--version" "$VERSION")
+  [[ -n "$BASELINE" ]] && args+=("--baseline" "$BASELINE")
+  [[ $WRITE_BASELINE -eq 1 ]] && args+=("--write-baseline")
+  python3 "$render" "${args[@]}"
+}
+
+# ---------------------------------------------------------------------------
+# Baseline snapshots and environment capture
+# ---------------------------------------------------------------------------
+IS_GIT=0
+git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 && IS_GIT=1
+
+# Exclude the report directory itself so writing reports never looks like the
+# engine mutated the repository under review.
+git_status_snapshot() {
+  if [[ $IS_GIT -eq 1 ]]; then
+    git -C "$REPO" status --short 2>/dev/null | grep -v '\.wpheka-quality-reports/' || true
+  fi
+}
+
+log_info "WPHEKA Quality v${VERSION} — deterministic baseline"
+if [[ $QUIET -eq 0 ]]; then
+  echo "Repository: $REPO"
+  echo "Reports:    $RUN_DIR"
+  [[ -n "${WPHEKA_CFG_CONFIG_FILE:-}" ]] && echo "Config:     $WPHEKA_CFG_CONFIG_FILE"
+  echo ""
+fi
+
+if [[ $IS_GIT -eq 1 ]]; then
+  git_status_snapshot > "$RAW/git-status-before.log"
+  git -C "$REPO" diff --name-only > "$RAW/git-diff-files-before.log" 2>&1 || true
+  git -C "$REPO" diff --stat > "$RAW/git-diff-stat-before.log" 2>&1 || true
+  git -C "$REPO" rev-parse --show-toplevel > "$RAW/git-root.log" 2>&1 || true
+  git -C "$REPO" branch --show-current > "$RAW/git-branch.log" 2>&1 || true
+  git -C "$REPO" rev-parse HEAD > "$RAW/git-head.log" 2>&1 || true
+else
+  : > "$RAW/git-status-before.log"
+  : > "$RAW/git-diff-files-before.log"
+fi
+
+{
+  echo "date=$(date -Iseconds 2>/dev/null || date)"
+  echo "host_os=$(uname -srm 2>/dev/null || true)"
+  echo "macos=$(sw_vers -productVersion 2>/dev/null || true)"
+  echo "bash=${BASH_VERSION:-unknown}"
+  echo "jobs=$JOBS"
+  echo "repo=$REPO"
+  echo "runner_version=$VERSION"
+} > "$RAW/environment.txt"
+
+# Tool versions go to their own file, not into results.tsv, so they cannot
+# inflate the check counts in the report.
+{
+  for tool_cmd in "php:php --version" "composer:composer --version" \
+                  "node:node --version" "npm:npm --version" "wp:wp --version" \
+                  "cr:cr --version" "semgrep:semgrep --version" \
+                  "gitleaks:gitleaks version" "phpcs:phpcs --version" \
+                  "phpstan:phpstan --version"; do
+    tool="${tool_cmd%%:*}"
+    vcmd="${tool_cmd#*:}"
+    if command -v "$tool" >/dev/null 2>&1; then
+      printf '%s\t%s\n' "$tool" "$(exec_with_timeout 30 bash -c "$vcmd" 2>&1 | head -1)"
+    else
+      printf '%s\t%s\n' "$tool" "(not installed)"
+    fi
+  done
+} > "$RAW/tool-versions.tsv" 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# 1. PHP syntax
+#
+# Runs from the repository root with a NUL-delimited file list, so paths with
+# spaces are handled and a wrong working directory can no longer make the check
+# pass by producing "Could not open input file" instead of a parse error.
+# ---------------------------------------------------------------------------
+if check_enabled php_syntax; then
+  if ! command -v php >/dev/null 2>&1; then
+    skip "php_syntax" "php not installed"
+  else
+    LIST_FILE="$RAW/php-files.txt"
+    if [[ $IS_GIT -eq 1 ]]; then
+      git -C "$REPO" ls-files -z '*.php' > "$LIST_FILE" 2>/dev/null || : > "$LIST_FILE"
+    else
+      ( cd "$REPO" && find . \
+          \( -name vendor -o -name node_modules -o -name .git \) -prune -o \
+          -name '*.php' -type f -print0 ) > "$LIST_FILE" 2>/dev/null || : > "$LIST_FILE"
+    fi
+
+    # Drop anything matching a configured exclude prefix.
+    if [[ -n "${WPHEKA_CFG_EXCLUDE:-}" ]]; then
+      python3 - "$LIST_FILE" <<'PY'
+import sys, os
+path = sys.argv[1]
+patterns = [p.strip() for p in os.environ.get("WPHEKA_CFG_EXCLUDE", "").splitlines() if p.strip()]
+with open(path, "rb") as fh:
+    names = [n for n in fh.read().split(b"\0") if n]
+kept = []
+for name in names:
+    text = name.decode("utf-8", "replace").lstrip("./")
+    if any(text == p.rstrip("/") or text.startswith(p.rstrip("/") + "/") or ("/" + p.rstrip("/") + "/") in ("/" + text) for p in patterns):
+        continue
+    kept.append(name)
+with open(path, "wb") as fh:
+    fh.write(b"\0".join(kept) + (b"\0" if kept else b""))
+PY
+    fi
+
+    PHP_FILE_COUNT="$(python3 -c 'import sys;d=open(sys.argv[1],"rb").read();print(len([x for x in d.split(b"\0") if x]))' "$LIST_FILE" 2>/dev/null || echo 0)"
+
+    if [[ "$PHP_FILE_COUNT" -eq 0 ]]; then
+      skip "php_syntax" "no PHP files to lint"
+    else
+      SYNTAX_LOG="$RAW/php_syntax.log"
+      : > "$SYNTAX_LOG"
+      # -n 1: `php -l` is only contractually single-file; parallelism comes
+      # from -P instead of batching, so older PHP builds cannot skip files.
+      #
+      # The `sh -c ... || exit 1` wrapper normalises php's exit code. `php -l`
+      # exits 255 on a parse error, and GNU xargs turns any 255 into its own
+      # exit 124 — indistinguishable from a timeout. Forcing each failure to 1
+      # makes xargs return 123 ("some invocation failed") instead.
+      exec_with_timeout "$(timeout_for php_syntax)" \
+        bash -c 'cd "$WPHEKA_TARGET_REPO" || exit 127; xargs -0 -n 1 -P "$1" sh -c '"'"'php -l "$1" || exit 1'"'"' _ < "$2"' \
+        _ "$JOBS" "$LIST_FILE" >> "$SYNTAX_LOG" 2>&1
+      SYNTAX_RC=$?
+
+      if [[ $WPHEKA_TIMED_OUT -eq 1 ]]; then
+        record "php_syntax" "TIMEOUT" "$SYNTAX_LOG" "$SYNTAX_RC" "lint exceeded timeout"
+      elif grep -q "Could not open input file" "$SYNTAX_LOG"; then
+        # Unreadable files mean the check did not actually verify the tree.
+        record "php_syntax" "ERROR" "$SYNTAX_LOG" "$SYNTAX_RC" "some files could not be opened"
+      elif [[ $SYNTAX_RC -ne 0 ]]; then
+        record "php_syntax" "FAIL" "$SYNTAX_LOG" "$SYNTAX_RC" "parse errors in ${PHP_FILE_COUNT} files scanned"
+      else
+        record "php_syntax" "PASS" "$SYNTAX_LOG" "0" "${PHP_FILE_COUNT} files"
+      fi
+    fi
+  fi
+else
+  skip "php_syntax" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 2. git diff --check (whitespace errors / conflict markers)
+# ---------------------------------------------------------------------------
+if check_enabled git_diff_check; then
+  if [[ $IS_GIT -eq 1 ]]; then
+    run_check "git_diff_check" "git diff --check"
+  else
+    skip "git_diff_check" "not a git repository"
+  fi
+else
+  skip "git_diff_check" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. PHPCS / WPCS — one invocation emits both the human log and the JSON report.
+# ---------------------------------------------------------------------------
+if check_enabled phpcs; then
+  PHPCS_OVERRIDE="$(check_command phpcs)"
+  PHPCS_BIN=""
+  if [[ -x "$REPO/vendor/bin/phpcs" ]]; then
+    PHPCS_BIN="vendor/bin/phpcs"
+  elif command -v phpcs >/dev/null 2>&1; then
+    PHPCS_BIN="phpcs"
+  fi
+
+  # phpcs exit codes: 0 clean, 1 issues found, 2 issues found and some are
+  # auto-fixable, 3 processing error. Only 3 means the tool failed to run; the
+  # issues themselves are reported as findings parsed from the JSON report.
+  if [[ -n "$PHPCS_OVERRIDE" ]]; then
+    run_check "phpcs" "$PHPCS_OVERRIDE" "0,1,2"
+  elif [[ -z "$PHPCS_BIN" ]]; then
+    skip "phpcs" "phpcs not installed"
+  else
+    PHPCS_STD_ARG=""
+    if [[ ! -f "$REPO/phpcs.xml" && ! -f "$REPO/phpcs.xml.dist" \
+       && ! -f "$REPO/.phpcs.xml" && ! -f "$REPO/.phpcs.xml.dist" ]]; then
+      # No repository ruleset, so fall back to the house standard.
+      PHPCS_STD_ARG="--standard=${WPHEKA_PHPCS_STANDARD:-WordPress}"
+    fi
+    run_check "phpcs" \
+      "$PHPCS_BIN $PHPCS_STD_ARG --report-full --report-json='$RAW/phpcs.json' -q ." \
+      "0,1,2"
+  fi
+else
+  skip "phpcs" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. PHPStan
+# ---------------------------------------------------------------------------
+if check_enabled phpstan; then
+  PHPSTAN_OVERRIDE="$(check_command phpstan)"
+  PHPSTAN_BIN=""
+  if [[ -x "$REPO/vendor/bin/phpstan" ]]; then
+    PHPSTAN_BIN="vendor/bin/phpstan analyse"
+  elif command -v phpstan >/dev/null 2>&1; then
+    PHPSTAN_BIN="phpstan analyse"
+  fi
+
+  if [[ -n "$PHPSTAN_OVERRIDE" ]]; then
+    run_check "phpstan" "$PHPSTAN_OVERRIDE" "0,1"
+  elif [[ -z "$PHPSTAN_BIN" ]]; then
+    skip "phpstan" "phpstan not installed"
+  elif [[ ! -f "$REPO/phpstan.neon" && ! -f "$REPO/phpstan.neon.dist" ]]; then
+    skip "phpstan" "phpstan installed but no phpstan.neon/.dist configuration"
+  else
+    run_check "phpstan" \
+      "$PHPSTAN_BIN --no-progress --no-interaction --error-format=json > '$RAW/phpstan.json' 2>'$RAW/phpstan.stderr.log'; rc=\$?; cat '$RAW/phpstan.stderr.log'; exit \$rc" \
+      "0,1"
+  fi
+else
+  skip "phpstan" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. PHPUnit
+# ---------------------------------------------------------------------------
+if check_enabled phpunit; then
+  PHPUNIT_OVERRIDE="$(check_command phpunit)"
+  PHPUNIT_BIN=""
+  if [[ -x "$REPO/vendor/bin/phpunit" ]]; then
+    PHPUNIT_BIN="vendor/bin/phpunit"
+  elif command -v phpunit >/dev/null 2>&1; then
+    PHPUNIT_BIN="phpunit"
+  fi
+
+  if [[ -n "$PHPUNIT_OVERRIDE" ]]; then
+    run_check "phpunit" "$PHPUNIT_OVERRIDE"
+  elif [[ -z "$PHPUNIT_BIN" ]]; then
+    skip "phpunit" "phpunit not installed"
+  elif [[ ! -f "$REPO/phpunit.xml" && ! -f "$REPO/phpunit.xml.dist" ]]; then
+    skip "phpunit" "phpunit installed but no phpunit.xml/.dist configuration"
+  else
+    run_check "phpunit" "$PHPUNIT_BIN --log-junit '$RAW/phpunit-junit.xml'"
+  fi
+else
+  skip "phpunit" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Composer validate / audit
+# ---------------------------------------------------------------------------
+if [[ ! -f "$REPO/composer.json" ]]; then
+  skip "composer_validate" "no composer.json"
+  skip "composer_audit" "no composer.json"
+elif ! command -v composer >/dev/null 2>&1; then
+  skip "composer_validate" "composer not installed"
+  skip "composer_audit" "composer not installed"
+else
+  if check_enabled composer_validate; then
+    run_check "composer_validate" "composer validate --no-check-publish --no-interaction"
+  else
+    skip "composer_validate" "disabled in configuration"
+  fi
+
+  if check_enabled composer_audit; then
+    if [[ -f "$REPO/composer.lock" ]]; then
+      run_check "composer_audit" \
+        "composer audit --no-interaction --format=json > '$RAW/composer-audit.json' 2>'$RAW/composer-audit.stderr.log'; rc=\$?; cat '$RAW/composer-audit.stderr.log'; exit \$rc"
+    else
+      skip "composer_audit" "no composer.lock to audit"
+    fi
+  else
+    skip "composer_audit" "disabled in configuration"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Semgrep — a single scan; findings are read from the JSON report.
+# ---------------------------------------------------------------------------
+if check_enabled semgrep; then
+  SEMGREP_OVERRIDE="$(check_command semgrep)"
+  if [[ -n "$SEMGREP_OVERRIDE" ]]; then
+    run_check "semgrep" "$SEMGREP_OVERRIDE" "0,1"
+  elif command -v semgrep >/dev/null 2>&1; then
+    # `--config auto` requires semgrep's metrics upload, which sends data about
+    # the scanned code to a third party. A review tool aimed at client code
+    # should not do that by default, so pin an explicit ruleset instead.
+    SEMGREP_CFG="${WPHEKA_SEMGREP_CONFIG:-p/php}"
+    [[ -f "$REPO/.semgrep.yml" ]] && SEMGREP_CFG=".semgrep.yml"
+    [[ -f "$REPO/.semgrep.yaml" ]] && SEMGREP_CFG=".semgrep.yaml"
+    run_check "semgrep" \
+      "semgrep scan --config '$SEMGREP_CFG' --quiet --json --output '$RAW/semgrep.json' --metrics=off" \
+      "0,1"
+  else
+    skip "semgrep" "semgrep not installed"
+  fi
+else
+  skip "semgrep" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 8. Gitleaks
+# ---------------------------------------------------------------------------
+if check_enabled gitleaks; then
+  if command -v gitleaks >/dev/null 2>&1; then
+    GITLEAKS_SRC="."
+    [[ $IS_GIT -eq 1 ]] || GITLEAKS_SRC="--no-git ."
+    run_check "gitleaks" \
+      "gitleaks detect --source . --no-banner --redact --exit-code 1 --report-format json --report-path '$RAW/gitleaks.json'" \
+      "0"
+  else
+    skip "gitleaks" "gitleaks not installed"
+  fi
+else
+  skip "gitleaks" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. WordPress Plugin Check
+# ---------------------------------------------------------------------------
+if check_enabled plugin_check; then
+  # `wp plugin check` is provided by the plugin-check plugin, which only loads
+  # inside a WordPress installation. Run from a bare plugin directory, wp-cli
+  # reports "'check' is not a registered subcommand" — so the installation has
+  # to be located and passed explicitly, or the check is not really running.
+  find_wp_root() {
+    local dir="$1"
+    while [[ "$dir" != "/" && -n "$dir" ]]; do
+      if [[ -f "$dir/wp-load.php" || -f "$dir/wp-config.php" ]]; then
+        printf '%s' "$dir"
+        return 0
+      fi
+      dir="$(dirname "$dir")"
+    done
+    return 1
+  }
+
+  WP_PATH="${WPHEKA_WP_PATH:-}"
+  [[ -n "$WP_PATH" ]] || WP_PATH="$(find_wp_root "$REPO" || true)"
+
+  if ! command -v wp >/dev/null 2>&1; then
+    skip "plugin_check" "wp-cli not installed"
+  elif [[ -f "$REPO/wp-config.php" || -d "$REPO/wp-content" ]]; then
+    # A full WordPress tree is not itself a plugin; point --repo at the plugin.
+    skip "plugin_check" "target is a WordPress installation, not a plugin directory"
+  elif [[ -z "$WP_PATH" ]]; then
+    skip "plugin_check" "no WordPress installation found above the plugin (set WPHEKA_WP_PATH)"
+  elif ! wp --path="$WP_PATH" cli has-command "plugin check" >/dev/null 2>&1; then
+    skip "plugin_check" "plugin-check is not active in $WP_PATH"
+  else
+    # A plugin needs at least one PHP file at its root. `[[ -f dir/*.php ]]`
+    # does not glob inside [[ ]], so count explicitly.
+    ROOT_PHP_COUNT="$(cd "$REPO" && ls -1 *.php 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ "$ROOT_PHP_COUNT" -eq 0 ]]; then
+      skip "plugin_check" "no PHP file at the repository root to identify a plugin"
+    else
+      # wp-cli exits non-zero only on error; findings come from the JSON report.
+      run_check "plugin_check" \
+        "wp --path='$WP_PATH' plugin check . --format=json > '$RAW/plugin-check.json' 2>'$RAW/plugin-check.stderr.log'; rc=\$?; cat '$RAW/plugin-check.stderr.log'; exit \$rc" \
+        "0"
+    fi
+  fi
+else
+  skip "plugin_check" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 10. npm lint / test (opt-in: they can execute repository-authored scripts)
+# ---------------------------------------------------------------------------
+if [[ ! -f "$REPO/package.json" ]]; then
+  skip "npm_lint" "no package.json"
+  skip "npm_test" "no package.json"
+elif ! command -v npm >/dev/null 2>&1; then
+  skip "npm_lint" "npm not installed"
+  skip "npm_test" "npm not installed"
+else
+  has_npm_script() {
+    python3 - "$REPO/package.json" "$1" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if (data.get("scripts") or {}).get(sys.argv[2]) else 1)
+PY
+  }
+
+  for npm_check in lint test; do
+    var="npm_${npm_check}"
+    if ! check_enabled "$var"; then
+      skip "$var" "opt-in: set checks.${var}: true (runs repository-authored scripts)"
+    elif ! has_npm_script "$npm_check"; then
+      skip "$var" "no '$npm_check' script in package.json"
+    elif [[ ! -d "$REPO/node_modules" ]]; then
+      skip "$var" "node_modules absent; the engine does not install dependencies"
+    else
+      run_check "$var" "npm run $npm_check --silent"
+    fi
+  done
+fi
+
+# ---------------------------------------------------------------------------
+# 11. CodeRabbit CLI
+# ---------------------------------------------------------------------------
+if check_enabled coderabbit; then
+  CR_BIN=""
+  if command -v cr >/dev/null 2>&1; then
+    CR_BIN="cr"
+  elif command -v coderabbit >/dev/null 2>&1; then
+    CR_BIN="coderabbit"
+  fi
+
+  if [[ -z "$CR_BIN" ]]; then
+    skip "coderabbit" "coderabbit cli not installed"
+  elif [[ $IS_GIT -eq 1 ]] && [[ -z "$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null)" ]]; then
+    skip "coderabbit" "repository has no commits"
+  else
+    CR_MODE="${WPHEKA_CODERABBIT_MODE:-uncommitted}"
+    case "$CR_MODE" in
+      uncommitted)
+        if [[ $IS_GIT -eq 1 && -z "$(git_status_snapshot)" ]]; then
+          skip "coderabbit" "no uncommitted changes to review"
+        else
+          run_check "coderabbit" "$CR_BIN --plain --type uncommitted"
+        fi
+        ;;
+      base)
+        CR_BASE="${WPHEKA_CODERABBIT_BASE:-}"
+        if [[ -z "$CR_BASE" ]]; then
+          # Prefer whatever the repository actually uses as its trunk.
+          for candidate in main master develop; do
+            if git -C "$REPO" rev-parse --verify "$candidate" >/dev/null 2>&1; then
+              CR_BASE="$candidate"; break
+            fi
+          done
+        fi
+        if [[ -z "$CR_BASE" ]]; then
+          skip "coderabbit" "no base branch found (set WPHEKA_CODERABBIT_BASE)"
+        elif [[ ! "$CR_BASE" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+          skip "coderabbit" "unsafe base ref: $CR_BASE"
+        elif ! git -C "$REPO" rev-parse --verify "$CR_BASE" >/dev/null 2>&1; then
+          skip "coderabbit" "base ref not found: $CR_BASE"
+        else
+          run_check "coderabbit" "$CR_BIN --plain --base '$CR_BASE'"
+        fi
+        ;;
+      *)
+        skip "coderabbit" "invalid WPHEKA_CODERABBIT_MODE '$CR_MODE' (use uncommitted or base)"
+        ;;
+    esac
+    # CodeRabbit is rate limited; surface that instead of reporting a bare failure.
+    if grep -qiE 'rate limit|too many requests|quota exceeded' "$RAW/coderabbit.log" 2>/dev/null; then
+      log_warn "coderabbit reported a rate limit; its findings are incomplete for this run"
+    fi
+  fi
+else
+  skip "coderabbit" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. Repository integrity — did the review mutate the working tree?
+# ---------------------------------------------------------------------------
+if [[ $IS_GIT -eq 1 ]]; then
+  git_status_snapshot > "$RAW/git-status-after.log"
+  git -C "$REPO" diff --name-only > "$RAW/git-diff-files-after.log" 2>&1 || true
+  git -C "$REPO" diff --stat > "$RAW/git-diff-stat-after.log" 2>&1 || true
+
+  if cmp -s "$RAW/git-status-before.log" "$RAW/git-status-after.log" &&
+     cmp -s "$RAW/git-diff-files-before.log" "$RAW/git-diff-files-after.log"; then
+    record "repository_integrity" "PASS" "$RAW/git-status-after.log" "0" "working tree unchanged"
+  else
+    record "repository_integrity" "WARNING" "$RAW/git-status-after.log" "-" \
+      "working tree changed during the review"
+  fi
+else
+  skip "repository_integrity" "not a git repository"
+fi
+
+trap - INT TERM
+
+# ---------------------------------------------------------------------------
+# Reports and exit status
+# ---------------------------------------------------------------------------
+if ! render_reports; then
+  die "report rendering failed" 3
+fi
+
+if [[ $WRITE_BASELINE -eq 1 ]]; then
+  [[ $QUIET -eq 0 ]] && echo "" && printf "${C_CYAN}Baseline written to${C_RESET} %s\n" "$BASELINE"
+  exit 0
+fi
+
+# Match on the status column exactly; a grep for the bare word would also hit
+# a detail string, and `grep -c` with no matches prints 0 *and* exits 1.
+count_status() {
+  awk -F'\t' -v want="$1" '$2 == want { n++ } END { print n + 0 }' "$RESULTS" 2>/dev/null || echo 0
+}
+
+FAIL_COUNT=$(( $(count_status FAIL) + $(count_status TIMEOUT) + $(count_status ERROR) ))
+WARN_COUNT=$(count_status WARNING)
+SKIP_COUNT=$(count_status SKIPPED)
+PASS_COUNT=$(count_status PASS)
+
+# Findings do not necessarily fail their tool's exit code — phpcs and semgrep
+# exit 0/1 whether or not they found something serious — so gate on severity
+# too, otherwise a leaked secret or a critical rule hit can pass the build.
+SEVERE_COUNT=0
+if [[ "$FAIL_ON_SEVERITY" != "none" && -f "$RUN_DIR/findings.json" ]]; then
+  SEVERE_COUNT="$(FAIL_SEV="$FAIL_ON_SEVERITY" python3 - "$RUN_DIR/findings.json" <<'PY' || echo 0
+import json, os, sys
+order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+threshold = order.index(os.environ["FAIL_SEV"].upper())
+try:
+    findings = json.load(open(sys.argv[1]))
+except Exception:
+    print(0); raise SystemExit(0)
+print(sum(1 for f in findings
+          if f.get("severity") in order and order.index(f["severity"]) <= threshold))
+PY
+)"
+  [[ "$SEVERE_COUNT" =~ ^[0-9]+$ ]] || SEVERE_COUNT=0
+fi
+
+if [[ $QUIET -eq 0 ]]; then
+  echo ""
+  printf "%s passed, %s failed, %s warnings, %s skipped\n" \
+    "$PASS_COUNT" "$FAIL_COUNT" "$WARN_COUNT" "$SKIP_COUNT"
+  if [[ "$SEVERE_COUNT" -gt 0 ]]; then
+    printf "%s finding(s) at or above %s severity\n" "$SEVERE_COUNT" "$FAIL_ON_SEVERITY"
+  fi
+  if [[ $SKIP_COUNT -gt 0 ]]; then
+    printf "${C_YELLOW}%s check(s) were skipped — those areas are unreviewed.${C_RESET}\n" "$SKIP_COUNT"
+  fi
+  if [[ $FAIL_COUNT -eq 0 && $WARN_COUNT -eq 0 && "$SEVERE_COUNT" -eq 0 ]]; then
+    printf "${C_GREEN}${C_BOLD}Reports:${C_RESET} %s\n" "$RUN_DIR"
+  else
+    printf "${C_RED}${C_BOLD}Reports:${C_RESET} %s\n" "$RUN_DIR"
+  fi
+fi
+
+[[ "$SEVERE_COUNT" -gt 0 ]] && exit 1
+
+case "$FAIL_ON" in
+  none)    exit 0 ;;
+  warning) [[ $FAIL_COUNT -gt 0 || $WARN_COUNT -gt 0 ]] && exit 1 ;;
+  error)   [[ $FAIL_COUNT -gt 0 ]] && exit 1 ;;
+esac
+exit 0

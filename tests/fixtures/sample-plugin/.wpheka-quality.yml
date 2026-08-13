@@ -1,0 +1,29 @@
+project_type: wordpress-plugin
+
+php:
+  minimum: "7.4"
+
+wordpress:
+  required: true
+
+# Only php_syntax runs here: the fixture exists to exercise the engine, not to
+# depend on which tools happen to be installed on the machine running the tests.
+checks:
+  php_syntax: true
+  git_diff_check: false
+  phpcs: false
+  phpstan: false
+  phpunit: false
+  composer_validate: false
+  composer_audit: false
+  semgrep: false
+  gitleaks: false
+  plugin_check: false
+  coderabbit: false
+
+exclude:
+  - vendor/
+  - node_modules/
+
+timeouts:
+  default: 120

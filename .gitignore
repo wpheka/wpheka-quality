@@ -1,0 +1,6 @@
+.wpheka-quality-reports/
+.quality-reports/
+.wpheka-quality/
+__pycache__/
+*.pyc
+.DS_Store
