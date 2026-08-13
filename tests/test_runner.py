@@ -560,18 +560,59 @@ class TestIntegration(unittest.TestCase):
                     self.assertTrue(cols[4].strip(), "check %s was skipped with no reason" % cols[0])
 
     def test_severity_gate_fails_the_run_on_a_critical_finding(self):
+        # Exercises the CLI gate end to end, not just the renderer's counting.
+        # A command override writes the report gitleaks would have written, so
+        # the check produces a CRITICAL finding without gitleaks being installed.
+        payload = json.dumps([{"File": "a.php", "StartLine": 1,
+                               "Description": "key", "RuleID": "r"}])
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_git_repo(pathlib.Path(tmp) / "r", {"a.php": "<?php\n$a = 1;\n"})
+            cfg = pathlib.Path(tmp) / "c.yml"
+            cfg.write_text(
+                "checks:\n  php_syntax: false\n  git_diff_check: false\n  gitleaks: true\n"
+                "commands:\n  gitleaks: \"printf '%s' > $WPHEKA_RAW_DIR/gitleaks.json\"\n"
+                % payload.replace('"', '\\"'))
+
             out = pathlib.Path(tempfile.mkdtemp())
-            (out / "tool-results").mkdir(parents=True)
-            res = run([RUNNER, "--repo", repo, "--output-dir", out, "--no-color", "--quiet",
-                       BASE_SKIPS, "--skip=phpcs"])
+            res = run([RUNNER, "--repo", repo, "--config", cfg, "--output-dir", out,
+                       "--no-color", "--quiet", "--fail-on-severity", "critical",
+                       "--skip=coderabbit,semgrep,phpstan,phpunit,composer_validate,"
+                       "composer_audit,plugin_check,npm_lint,npm_test,phpcs"])
+            findings = json.loads((out / "findings.json").read_text())
+            self.assertEqual([f["severity"] for f in findings], ["CRITICAL"])
+            self.assertNotEqual(res.returncode, 0,
+                                "a CRITICAL finding must fail the run under --fail-on-severity critical")
+
+    def test_severity_gate_none_allows_a_critical_finding_through(self):
+        payload = json.dumps([{"File": "a.php", "StartLine": 1,
+                               "Description": "key", "RuleID": "r"}])
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_git_repo(pathlib.Path(tmp) / "r", {"a.php": "<?php\n$a = 1;\n"})
+            cfg = pathlib.Path(tmp) / "c.yml"
+            cfg.write_text(
+                "checks:\n  php_syntax: false\n  git_diff_check: false\n  gitleaks: true\n"
+                "commands:\n  gitleaks: \"printf '%s' > $WPHEKA_RAW_DIR/gitleaks.json\"\n"
+                % payload.replace('"', '\\"'))
+            out = pathlib.Path(tempfile.mkdtemp())
+            res = run([RUNNER, "--repo", repo, "--config", cfg, "--output-dir", out,
+                       "--no-color", "--quiet", "--fail-on-severity", "none",
+                       "--skip=coderabbit,semgrep,phpstan,phpunit,composer_validate,"
+                       "composer_audit,plugin_check,npm_lint,npm_test,phpcs"])
             self.assertEqual(res.returncode, 0)
-            # Inject a CRITICAL finding the way gitleaks would, then re-render.
-            (out / "tool-results" / "gitleaks.json").write_text(json.dumps([
-                {"File": "a.php", "StartLine": 1, "Description": "key", "RuleID": "r"}]))
-            rendered = run([sys.executable, RENDERER, out, repo, "json", "--version", "test"])
-            self.assertEqual(json.loads(rendered.stdout)["severity_counts"]["CRITICAL"], 1)
+
+    def test_regression_custom_output_dir_inside_repo_is_not_a_mutation(self):
+        # The integrity snapshot filtered the literal default report path, so a
+        # custom --output-dir inside the repository looked like the engine had
+        # modified the working tree.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_git_repo(pathlib.Path(tmp) / "r", {"a.php": "<?php\n$a = 1;\n"})
+            out = repo / "build" / "quality-reports"
+            res = run([RUNNER, "--repo", repo, "--output-dir", out,
+                       "--no-color", "--quiet", BASE_SKIPS, "--skip=phpcs"])
+            rows = dict(line.split("\t")[:2]
+                        for line in (out / "results.tsv").read_text().splitlines())
+            self.assertEqual(rows.get("repository_integrity"), "PASS",
+                             "writing reports inside the repo must not read as a mutation")
 
     def test_non_git_directory_is_handled(self):
         with tempfile.TemporaryDirectory() as tmp:

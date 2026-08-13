@@ -102,7 +102,17 @@ install_gitleaks() {
     arm64|aarch64) arch="arm64" ;;
     *) warn "unsupported architecture for automatic gitleaks install"; return ;;
   esac
-  url="https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_${os}_${arch}.tar.gz"
+  # Release assets embed the version (gitleaks_8.30.1_linux_x64.tar.gz), so the
+  # /latest/download/ shortcut cannot name one. Resolve the tag first.
+  local version
+  version="$(curl -fsSL https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
+             | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' \
+             | head -1)"
+  if [[ -z "$version" ]]; then
+    warn "could not resolve the latest gitleaks version; the check will be SKIPPED"
+    return
+  fi
+  url="https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_${os}_${arch}.tar.gz"
   if [[ $DRY_RUN -eq 1 ]]; then
     printf '    would download %s into %s\n' "$url" "$LOCAL_BIN"
     return

@@ -3,8 +3,10 @@
 ## HPOS
 
 High-Performance Order Storage moves orders out of the posts tables. Code that
-reads order data with `get_post_meta` or queries `wp_posts` directly still works
-on a legacy install and silently returns nothing on an HPOS one.
+reads order data with `get_post_meta` or queries `wp_posts` directly is unsafe:
+compatibility-mode synchronisation may be disabled, incomplete, stale, or absent
+entirely, so such reads can return nothing or return outdated values. Use the
+WooCommerce CRUD APIs, which read whichever store is authoritative.
 
 Declaring compatibility is not the same as being compatible. Check:
 

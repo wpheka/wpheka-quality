@@ -920,6 +920,13 @@ def main():
     parser.add_argument("--write-baseline", action="store_true")
     args = parser.parse_args()
 
+    # The shell wrapper checks this too, but the renderer is documented as
+    # runnable on its own against an existing report directory, and without the
+    # check it dies on pathlib.Path(None) with a bare TypeError.
+    if args.write_baseline and not args.baseline:
+        sys.stderr.write("render-report: --write-baseline requires --baseline FILE\n")
+        return 2
+
     run_dir = pathlib.Path(args.run_dir).resolve()
     repo = pathlib.Path(args.repo).resolve()
     raw_dir = run_dir / "tool-results"

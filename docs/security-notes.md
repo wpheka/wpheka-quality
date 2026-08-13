@@ -69,9 +69,11 @@ attached to a ticket without leaking the credential it found.
 ### Bounded execution
 
 Every check runs under a timeout (`timeouts:` in config, `--list-checks` to see
-the resolved values). On expiry the process group is terminated and the check is
-recorded as `TIMEOUT` — a distinct status from `FAIL`, because a check that
-never finished proves nothing either way.
+the resolved values). On expiry the check process and its direct children are
+signalled — `TERM`, then `KILL` — and the check is recorded as `TIMEOUT`, a
+status distinct from `FAIL`, because a check that never finished proves nothing
+either way. A tool that daemonises beyond its direct children can still outlive
+the signal; the check is recorded as `TIMEOUT` regardless.
 
 ### Known limits
 

@@ -46,9 +46,10 @@ Responsibilities:
 - emit `summary.md`, `full-review.md`, `findings.json`, `results.json`,
   `sarif.json` and a self-contained `report.html`
 
-The renderer is pure: given a run directory it produces the same artifacts, so
-an old run can be re-rendered after a parser improvement without re-running any
-tool.
+Findings are re-derived deterministically from the run directory, so an old run
+can be re-rendered after a parser improvement without re-running any tool. Run
+metadata (timestamps, current git branch and commit) is regenerated at render
+time and will differ between renders of the same run.
 
 ### Why the parsers are defensive
 

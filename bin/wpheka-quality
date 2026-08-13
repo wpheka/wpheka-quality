@@ -569,9 +569,24 @@ git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 && IS_GIT=1
 
 # Exclude the report directory itself so writing reports never looks like the
 # engine mutated the repository under review.
+#
+# The exclusion is derived from the resolved RUN_DIR rather than the default
+# path, because --output-dir can put reports anywhere, including inside the
+# repository under a different name.
+RUN_DIR_REL=""
+case "$RUN_DIR/" in
+  "$REPO"/*) RUN_DIR_REL="${RUN_DIR#$REPO/}" ;;
+esac
+
 git_status_snapshot() {
-  if [[ $IS_GIT -eq 1 ]]; then
-    git -C "$REPO" status --short 2>/dev/null | grep -v '\.wpheka-quality-reports/' || true
+  [[ $IS_GIT -eq 1 ]] || return 0
+  if [[ -n "$RUN_DIR_REL" ]]; then
+    # -uall lists untracked files individually; without it git collapses them
+    # into a bare directory entry that no pathspec exclusion can match.
+    git -C "$REPO" status --short -uall -- \
+      . ":(exclude)$RUN_DIR_REL" ":(exclude)$RUN_DIR_REL/**" 2>/dev/null || true
+  else
+    git -C "$REPO" status --short -uall 2>/dev/null || true
   fi
 }
 
@@ -666,6 +681,29 @@ PY
 
     if [[ "$PHP_FILE_COUNT" -eq 0 ]]; then
       skip "php_syntax" "no PHP files to lint"
+    elif ! python3 - "$LIST_FILE" >"$RAW/php-unreadable.log" 2>&1 <<'PY'
+import os, sys
+os.chdir(os.environ["WPHEKA_TARGET_REPO"])
+with open(sys.argv[1], "rb") as fh:
+    names = [n for n in fh.read().split(b"\0") if n]
+missing = [n.decode("utf-8", "replace") for n in names
+           if not os.path.isfile(n) or not os.access(n, os.R_OK)]
+for name in missing:
+    sys.stderr.write("unreadable: %s\n" % name)
+sys.exit(1 if missing else 0)
+PY
+    then
+      # Establishing readability up front means the lint's own exit code is the
+      # only thing that decides pass or fail. Deciding ERROR by grepping the log
+      # for "Could not open input file" was status-by-log-scraping, which is the
+      # exact practice the engine refuses to accept from any other check.
+      UNREADABLE_COUNT="$(grep -c '^unreadable:' "$RAW/php-unreadable.log" | tr -d ' ')"
+      if [[ "$UNREADABLE_COUNT" == "1" ]]; then
+        record "php_syntax" "ERROR" "$RAW/php-unreadable.log" "1" "1 listed file is unreadable"
+      else
+        record "php_syntax" "ERROR" "$RAW/php-unreadable.log" "1" \
+          "$UNREADABLE_COUNT listed files are unreadable"
+      fi
     else
       SYNTAX_LOG="$RAW/php_syntax.log"
       : > "$SYNTAX_LOG"
@@ -683,9 +721,6 @@ PY
 
       if [[ $WPHEKA_TIMED_OUT -eq 1 ]]; then
         record "php_syntax" "TIMEOUT" "$SYNTAX_LOG" "$SYNTAX_RC" "lint exceeded timeout"
-      elif grep -q "Could not open input file" "$SYNTAX_LOG"; then
-        # Unreadable files mean the check did not actually verify the tree.
-        record "php_syntax" "ERROR" "$SYNTAX_LOG" "$SYNTAX_RC" "some files could not be opened"
       elif [[ $SYNTAX_RC -ne 0 ]]; then
         record "php_syntax" "FAIL" "$SYNTAX_LOG" "$SYNTAX_RC" "parse errors in ${PHP_FILE_COUNT} files scanned"
       else
@@ -852,11 +887,16 @@ fi
 # 8. Gitleaks
 # ---------------------------------------------------------------------------
 if check_enabled gitleaks; then
-  if command -v gitleaks >/dev/null 2>&1; then
-    GITLEAKS_SRC="."
-    [[ $IS_GIT -eq 1 ]] || GITLEAKS_SRC="--no-git ."
+  GITLEAKS_OVERRIDE="$(check_command gitleaks)"
+  if [[ -n "$GITLEAKS_OVERRIDE" ]]; then
+    run_check "gitleaks" "$GITLEAKS_OVERRIDE" "0"
+  elif command -v gitleaks >/dev/null 2>&1; then
+    # Outside a git work tree there is no history to walk, and gitleaks errors
+    # instead of falling back, so --no-git has to be passed through.
+    GITLEAKS_ARGS="--source ."
+    [[ $IS_GIT -eq 1 ]] || GITLEAKS_ARGS="--source . --no-git"
     run_check "gitleaks" \
-      "gitleaks detect --source . --no-banner --redact --exit-code 1 --report-format json --report-path '$RAW/gitleaks.json'" \
+      "gitleaks detect $GITLEAKS_ARGS --no-banner --redact --exit-code 1 --report-format json --report-path '$RAW/gitleaks.json'" \
       "0"
   else
     skip "gitleaks" "gitleaks not installed"
@@ -888,7 +928,10 @@ if check_enabled plugin_check; then
   WP_PATH="${WPHEKA_WP_PATH:-}"
   [[ -n "$WP_PATH" ]] || WP_PATH="$(find_wp_root "$REPO" || true)"
 
-  if ! command -v wp >/dev/null 2>&1; then
+  PLUGIN_CHECK_OVERRIDE="$(check_command plugin_check)"
+  if [[ -n "$PLUGIN_CHECK_OVERRIDE" ]]; then
+    run_check "plugin_check" "$PLUGIN_CHECK_OVERRIDE" "0"
+  elif ! command -v wp >/dev/null 2>&1; then
     skip "plugin_check" "wp-cli not installed"
   elif [[ -f "$REPO/wp-config.php" || -d "$REPO/wp-content" ]]; then
     # A full WordPress tree is not itself a plugin; point --repo at the plugin.

@@ -64,3 +64,26 @@ jobs:
           name: fixture-report-${{ matrix.os }}
           path: ${{ runner.temp }}/fixture-report/
           if-no-files-found: ignore
+
+  minimum-python:
+    # The README claims Python 3.8. The matrix runners ship something much
+    # newer, so without this job that claim is never exercised.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          tools: composer
+          coverage: none
+
+      - name: Confirm the interpreter under test
+        run: python3 --version
+
+      - name: Run the test suite on the minimum supported Python
+        run: python3 tests/test_runner.py

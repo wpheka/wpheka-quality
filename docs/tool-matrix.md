@@ -57,11 +57,12 @@ rank consistently:
 
 | Reported | Normalised |
 |---|---|
-| `ERROR`, `BLOCKER` (semgrep/phpcs) | `HIGH` / `CRITICAL` |
-| `WARNING`, `WARN`, `MAJOR` | `MEDIUM` |
+| `BLOCKER` | `CRITICAL` |
+| `ERROR`, `MAJOR` | `HIGH` |
+| `WARNING`, `WARN` | `MEDIUM` |
 | `NOTICE`, `MINOR` | `LOW` |
-| `INFO`, `INFORMATIONAL` | `INFO` |
-| Gitleaks findings | `CRITICAL` |
+| `INFO`, `INFORMATIONAL`, `NONE` | `INFO` |
+| Gitleaks findings | `CRITICAL` (always) |
 
 Without this, a semgrep `ERROR` and a phpcs `ERROR` would sort differently for
 no reason other than which tool found them.

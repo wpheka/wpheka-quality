@@ -56,7 +56,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0   # gitleaks and --fail-on base comparisons need history
+          fetch-depth: 0   # gitleaks scans history; a shallow clone hides it
+
+      - name: Check out the quality engine
+        uses: actions/checkout@v5
+        with:
+          repository: wpheka/wpheka-quality
+          ref: v1.1.0            # pin a tag; the engine is a gate, not a moving target
+          path: wpheka-quality
 
       - uses: shivammathur/setup-php@v2
         with:
@@ -80,7 +87,8 @@ jobs:
       - name: Install scanners
         run: |
           python3 -m pip install --quiet semgrep
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_linux_x64.tar.gz \
+          GITLEAKS_VERSION=8.30.1
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | tar -xz -C /usr/local/bin gitleaks
 
       - name: Check toolchain

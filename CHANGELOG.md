@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.1.0
+
+Fixes from the first external code review of the 1.0.0 tree.
+
+### Fixed
+
+- **`gitleaks` ignored its own non-git handling.** `GITLEAKS_SRC` was computed
+  and then never used, so directories outside a git work tree were scanned
+  without `--no-git` — the exact case the branch existed for.
+- **The gitleaks installer downloaded a URL that does not exist.** Release
+  assets embed the version (`gitleaks_8.30.1_linux_x64.tar.gz`), so the
+  `/latest/download/` shortcut returned HTTP 404 and every Linux install
+  silently ended up without gitleaks. The installer now resolves the tag first.
+  The same URL was wrong in `docs/ci.md`.
+- **`php_syntax` decided `ERROR` by grepping its log** for "Could not open input
+  file". That is status-by-log-scraping, the practice the engine refuses to
+  accept from any other check. Readability is now established before linting,
+  so the lint's exit code is the only thing that decides pass or fail.
+- **`repository_integrity` misreported a custom `--output-dir`.** The snapshot
+  filtered the literal default report path, so writing reports anywhere else
+  inside the repository looked like the engine had modified the working tree.
+  The exclusion is now derived from the resolved run directory.
+- **`render-report.py --write-baseline` without `--baseline` crashed** with a
+  bare `TypeError`. The renderer is documented as independently runnable, so it
+  now validates the combination itself.
+- **`commands:` overrides for `gitleaks` and `plugin_check` were accepted by the
+  config loader and then ignored** by the runner. Both are now honoured.
+
+### Testing
+
+- `test_severity_gate_fails_the_run_on_a_critical_finding` asserted the CLI
+  exited **zero** and then only checked the renderer's counting, so it never
+  exercised the gate its name described. It now drives the CLI end to end, with
+  a companion test for `--fail-on-severity none`.
+- Added a regression test for a custom `--output-dir` inside the repository.
+- Added a CI job running the suite on Python 3.8. The README claimed 3.8
+  support while every runner used something far newer, leaving the claim
+  untested.
+
+### Documentation
+
+- `docs/tool-matrix.md` mapped `MAJOR` to `MEDIUM`; the code maps it to `HIGH`.
+- `docs/ci.md` invoked `wpheka-quality/bin/...` without ever checking out the
+  engine, so the published recipe could not run. It now checks out a pinned tag.
+- `docs/security-notes.md` claimed the process *group* is terminated on timeout;
+  the implementation signals the process and its direct children.
+- `docs/architecture.md` called the renderer "pure" while it regenerates
+  timestamps and git metadata on every render.
+- `docs/woocommerce-notes.md` implied direct `get_post_meta` reads merely fail
+  on HPOS installs. Compatibility-mode synchronisation may be disabled,
+  incomplete or stale, so such reads can also return outdated values.
+- `docs/ci.md` cited "`--fail-on` base comparisons" as a reason for full clone
+  depth. No such feature exists; only gitleaks history scanning needs it.
+
+### Not changed
+
+The review also recommended removing the Composer install from the self-test
+workflow, citing the AGENTS.md rule "Never update or install dependencies".
+That rule governs engine behaviour *during a review*, not CI provisioning.
+GitHub runners do not ship WPCS, so following it would break the immediately
+following step that asserts the WordPress standard is registered.
+
 ## 1.0.0 — first public release
 
 A review-first quality engine for WordPress and WooCommerce repositories. It
