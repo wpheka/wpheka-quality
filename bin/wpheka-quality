@@ -166,6 +166,15 @@ if [[ $WRITE_BASELINE -eq 1 && -z "$BASELINE" ]]; then
   die "--write-baseline requires --baseline FILE"
 fi
 
+# Validated here rather than inside the phpcs check. The value is interpolated
+# into a command string, so it must be rejected whether or not phpcs happens to
+# be installed on this machine -- otherwise the guard silently disappears on
+# exactly the hosts where the check is skipped.
+PHPCS_MEM_LIMIT="${WPHEKA_PHPCS_MEMORY_LIMIT:-1G}"
+if [[ ! "$PHPCS_MEM_LIMIT" =~ ^(-1|[0-9]+[KMGkmg]?)$ ]]; then
+  die "invalid WPHEKA_PHPCS_MEMORY_LIMIT '$PHPCS_MEM_LIMIT' (expected e.g. 512M, 1G or -1)"
+fi
+
 [[ -d "$REPO" ]] || die "target repository does not exist: $REPO"
 REPO="$(cd "$REPO" && pwd)" || die "cannot enter target repository: $REPO"
 export WPHEKA_TARGET_REPO="$REPO"
@@ -806,14 +815,9 @@ if check_enabled phpcs; then
     # limit on a large tree, which surfaces as a fatal error rather than as
     # findings. Raise it here so the check reports on the code, not on PHP.
     #
-    # The value is interpolated into a command string, so it is validated as a
-    # PHP memory-limit literal first. Without this, exporting
-    # WPHEKA_PHPCS_MEMORY_LIMIT='1G; rm -rf ~' executes that command -- the
-    # same class of defect as the config eval this engine was built to avoid.
-    PHPCS_MEM_LIMIT="${WPHEKA_PHPCS_MEMORY_LIMIT:-1G}"
-    if [[ ! "$PHPCS_MEM_LIMIT" =~ ^(-1|[0-9]+[KMGkmg]?)$ ]]; then
-      die "invalid WPHEKA_PHPCS_MEMORY_LIMIT '$PHPCS_MEM_LIMIT' (expected e.g. 512M, 1G or -1)"
-    fi
+    # PHPCS_MEM_LIMIT was validated at startup as a PHP memory-limit literal.
+    # Without that guard, WPHEKA_PHPCS_MEMORY_LIMIT='1G; rm -rf ~' would execute
+    # here -- the same class of defect as the config eval this engine avoids.
     PHPCS_MEM="-d memory_limit=$PHPCS_MEM_LIMIT"
 
     run_check "phpcs" \

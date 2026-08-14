@@ -82,8 +82,22 @@ jobs:
           tools: composer
           coverage: none
 
-      - name: Confirm the interpreter under test
-        run: python3 --version
+      - name: Install WordPress coding standards
+        run: |
+          # Without this the phpcs ruleset tests skip silently on this job, and
+          # a silent skip is the failure mode this project exists to reject.
+          composer global config --no-plugins \
+            allow-plugins.dealerdirect/phpcodesniffer-composer-installer true
+          composer global require --no-interaction --no-progress \
+            squizlabs/php_codesniffer \
+            wp-coding-standards/wpcs \
+            dealerdirect/phpcodesniffer-composer-installer
+          echo "$(composer global config bin-dir --absolute)" >> "$GITHUB_PATH"
+
+      - name: Confirm the interpreter and toolchain under test
+        run: |
+          python3 --version
+          phpcs -i | grep -q WordPress
 
       - name: Run the test suite on the minimum supported Python
         run: python3 tests/test_runner.py

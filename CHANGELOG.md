@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.1
+
+### Fixed
+
+- **`WPHEKA_PHPCS_MEMORY_LIMIT` was validated inside the phpcs check**, so on a
+  machine without phpcs the check was skipped and the guard never ran. No
+  injection was possible there — the value is only interpolated when phpcs
+  actually runs — but a guard that disappears on some hosts is not a guard.
+  It is now validated at startup with the other inputs, and rejects bad values
+  regardless of which tools are installed.
+
+  Caught by the Python 3.8 CI job, which runs without phpcs and is the only job
+  that exercises that path.
+
+### Testing
+
+- The minimum-Python job now installs WPCS. Without it, the two phpcs ruleset
+  tests skipped silently on that job, leaving the rulesets unverified on the
+  interpreter the README claims to support.
+
+51 tests, green on Ubuntu, macOS, and Python 3.8.
+
 ## 1.2.0
 
 Behaviour change: phpcs now runs a ruleset with formatting-only sniffs
