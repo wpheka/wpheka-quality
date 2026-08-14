@@ -624,6 +624,42 @@ class TestIntegration(unittest.TestCase):
             self.assertEqual(rows.get("git_diff_check"), "SKIPPED")
             self.assertEqual(rows.get("repository_integrity"), "SKIPPED")
 
+    @unittest.skipUnless(HAVE_GIT, "git required")
+    def test_regression_coderabbit_is_invoked_with_flags_the_cli_accepts(self):
+        # The pre-1.1.1 engine ran `cr --plain --type uncommitted`. The CodeRabbit
+        # CLI has neither option -- scope is a boolean flag on the `review`
+        # subcommand -- so every run died with a usage error in about two seconds
+        # and the check could never pass. It failed loudly rather than silently,
+        # but the check was dead weight on every install with a current CLI.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            repo = make_git_repo(root / "r", {"a.php": "<?php\n$a = 1;\n"})
+
+            # An uncommitted edit, or the engine skips before invoking anything.
+            (repo / "a.php").write_text("<?php\n$a = 2;\n")
+
+            # A stub `cr` that records its argv instead of reviewing anything.
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            argv_log = root / "argv.txt"
+            stub = bin_dir / "cr"
+            stub.write_text('#!/bin/sh\nprintf "%%s\\n" "$*" > "%s"\nexit 0\n' % argv_log)
+            stub.chmod(0o755)
+
+            out = pathlib.Path(tempfile.mkdtemp())
+            env = dict(os.environ, PATH="%s:%s" % (bin_dir, os.environ.get("PATH", "")))
+            run([RUNNER, "--repo", repo, "--output-dir", out, "--no-color",
+                 "--quiet", "--only", "coderabbit"], env=env)
+
+            self.assertTrue(argv_log.exists(),
+                            "coderabbit check never invoked the cli")
+            argv = argv_log.read_text().strip()
+
+            self.assertIn("review", argv, "scope flags belong to the review subcommand")
+            self.assertIn("--uncommitted", argv)
+            self.assertNotIn("--plain", argv, "no such option; it is a usage error")
+            self.assertNotIn("--type", argv, "no such option; it is a usage error")
+
     def test_empty_repository_does_not_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = pathlib.Path(tmp) / "empty"

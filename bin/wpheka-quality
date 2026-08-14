@@ -1008,13 +1008,19 @@ if check_enabled coderabbit; then
   elif [[ $IS_GIT -eq 1 ]] && [[ -z "$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null)" ]]; then
     skip "coderabbit" "repository has no commits"
   else
+    # Invocations use the `review` subcommand with boolean scope flags, which is
+    # what the CodeRabbit CLI actually accepts. An earlier form passed
+    # `--plain --type <scope>`; neither option exists, so every run died with a
+    # usage error in about two seconds and the check could never pass. Nothing
+    # parses this output structurally -- the log is raw evidence, read only for
+    # a rate-limit notice below -- so no output-format flag is needed.
     CR_MODE="${WPHEKA_CODERABBIT_MODE:-uncommitted}"
     case "$CR_MODE" in
       uncommitted)
         if [[ $IS_GIT -eq 1 && -z "$(git_status_snapshot)" ]]; then
           skip "coderabbit" "no uncommitted changes to review"
         else
-          run_check "coderabbit" "$CR_BIN --plain --type uncommitted"
+          run_check "coderabbit" "$CR_BIN review --uncommitted"
         fi
         ;;
       base)
@@ -1034,7 +1040,7 @@ if check_enabled coderabbit; then
         elif ! git -C "$REPO" rev-parse --verify "$CR_BASE" >/dev/null 2>&1; then
           skip "coderabbit" "base ref not found: $CR_BASE"
         else
-          run_check "coderabbit" "$CR_BIN --plain --base '$CR_BASE'"
+          run_check "coderabbit" "$CR_BIN review --base '$CR_BASE'"
         fi
         ;;
       *)

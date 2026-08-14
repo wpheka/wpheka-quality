@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.1.1
+
+### Fixed
+
+- **The `coderabbit` check could never pass.** It invoked
+  `cr --plain --type uncommitted`, and the CodeRabbit CLI has neither option —
+  scope is a boolean flag on the `review` subcommand. Every run died with a
+  usage error in roughly two seconds, so the check was dead weight on any
+  install with a current CLI, and a repository that gated on it could not go
+  green. Both invocations now use `cr review --uncommitted` and
+  `cr review --base <branch>`.
+
+  The engine failed loudly rather than reporting a false pass, which is the
+  behaviour its design rules ask for — but a check that always fails teaches
+  people to ignore it, which costs the same in the end.
+
+  `skills/wpheka-quality/SKILL.md` documented the same wrong syntax and is
+  corrected, with the whole-repository form (`--base-commit` with the root
+  commit) added since reviewing an entire repository is otherwise unobvious.
+
 ## 1.1.0
 
 Fixes from the first external code review of the 1.0.0 tree.

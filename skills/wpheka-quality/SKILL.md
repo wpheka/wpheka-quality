@@ -98,17 +98,28 @@ Do not install missing tools during an unattended review. Record the gap.
 
 ## Phase 3 — CodeRabbit
 
-For local uncommitted work, use:
+Scope flags are booleans on the `review` subcommand, not values passed to a
+`--type` option. For local uncommitted work, use:
 
 ```bash
-cr --plain --type uncommitted
+cr review --uncommitted
 ```
 
 For a branch comparison, use the configured base branch:
 
 ```bash
-cr --plain --base <base-branch>
+cr review --base <base-branch>
 ```
+
+To review an entire repository rather than a diff, use the root commit as the
+base — no throwaway branch needed:
+
+```bash
+cr review --base-commit "$(git rev-list --max-parents=0 HEAD)" --dir <path>
+```
+
+Add `--agent` for structured findings when you intend to parse them; the engine
+does not, and keeps the plain output as raw evidence instead.
 
 CodeRabbit is rate limited. If its log mentions a rate limit, its findings are
 incomplete for that run — say so rather than reporting a clean review.
