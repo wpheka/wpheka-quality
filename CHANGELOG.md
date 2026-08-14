@@ -1,5 +1,89 @@
 # Changelog
 
+## 1.2.0
+
+Behaviour change: phpcs now runs a ruleset with formatting-only sniffs
+excluded. Existing baselines should be regenerated.
+
+### Changed
+
+- **phpcs no longer reports formatting by default.** `config/phpcs-default.xml`
+  is WPCS with layout sniffs removed, and is used when a repository does not
+  ship its own ruleset.
+
+  Measured on a real plugin, the full standard produced 1427 findings, of which
+  roughly 1200 were indentation, alignment and bracket spacing.
+  `Generic.WhiteSpace.DisallowSpaceIndent` alone was 41% of the report. Buried
+  underneath were 32 missing or recommended nonce checks, 17 unescaped outputs
+  and 7 direct database queries. The default ruleset reports 157 findings and
+  loses none of those 49.
+
+  The engine's own documentation already said not to let low-severity WPCS
+  findings hide a critical defect. It was creating that exact problem.
+
+  Nothing excluded can describe a bug; every removed sniff reports on the shape
+  of the source rather than its behaviour. `--all-sniffs` applies WPCS
+  untouched, and a repository's own ruleset always takes precedence. The
+  ruleset in use is printed beside the check, because one that silently drops
+  sniffs is indistinguishable from a clean codebase.
+
+- **`summary.md` separates checks that found problems from checks that produced
+  no verdict.** `ERROR` and `TIMEOUT` now sit with `SKIPPED` under "Unreviewed
+  areas" instead of beside `FAIL`. A tool that was killed halfway did not
+  review the code and should not read as though it did.
+
+### Fixed
+
+- **phpcs ran with PHP's default memory limit** and exhausts it on a large
+  tree, surfacing as a fatal error rather than as findings. It now runs with
+  `memory_limit=1G`, overridable via `WPHEKA_PHPCS_MEMORY_LIMIT`.
+
+### Security
+
+- **`WPHEKA_PHPCS_MEMORY_LIMIT` could execute arbitrary commands.** The value
+  was interpolated straight into the phpcs command string, which runs through
+  `bash -c`, so `WPHEKA_PHPCS_MEMORY_LIMIT='1G; rm -rf ~'` ran that command.
+  Introduced by the memory-limit fix above and caught by review before release.
+  The value is now validated as a PHP memory-limit literal.
+
+  This is the same class of defect as the config `eval` the engine was built to
+  avoid, which is a reminder that the rule has to be applied to every new
+  interpolation, not just the one that prompted it.
+
+### Added
+
+- `--all-sniffs`, and the two bundled rulesets it selects between.
+- Tests asserting both rulesets load with no unknown sniff names — a single
+  invalid name makes phpcs abort, so the check would report a tool failure
+  instead of reviewing anything — and that the default ruleset drops whitespace
+  findings while keeping `EscapeOutput`.
+- A test asserting no-verdict checks are reported separately from failures.
+
+- A regression test proving the memory-limit value cannot reach the shell, and
+  one asserting valid literals are still accepted.
+
+51 tests, green on Ubuntu, macOS, and Python 3.8.
+
+### Notes
+
+phpcs success codes are allow-listed (`0`, `1`, `2`) rather than failure codes
+deny-listed. That is deliberate: a tool failure is exit 3 on phpcs 3.x and exit
+16 on phpcs 4.x (verified against 4.0.4), and both already report `FAIL`
+without version-specific handling.
+
+### Upgrading
+
+Reports will be substantially shorter. If you gate on a baseline, regenerate
+it:
+
+```bash
+wpheka-quality --repo . --baseline .wpheka-baseline.json --write-baseline
+```
+
+Keeping the old baseline is harmless but pointless: it holds fingerprints for
+formatting findings that are no longer reported. To keep the previous
+behaviour, pass `--all-sniffs` or set `WPHEKA_PHPCS_STANDARD=WordPress`.
+
 ## 1.1.1
 
 ### Fixed

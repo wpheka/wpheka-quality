@@ -812,20 +812,32 @@ def render_summary_md(repo, repo_info, rows, findings, sev_counts, version, base
             row["detail"].replace("|", "\\|") or "",
         ))
 
-    skipped = [r for r in rows if r["status"] == "SKIPPED"]
-    if skipped:
-        lines += ["", "## Skipped checks", "",
-                  "These produced **no evidence**. Treat the areas they cover as unreviewed.", ""]
-        for row in skipped:
-            lines.append("- `%s` — %s" % (row["check"], row["detail"] or "no reason recorded"))
-
-    failed = [r for r in rows if r["status"] in FAILING_STATUSES]
+    # A check that found problems and a check that produced no verdict are
+    # different facts, and listing them together invites reading the second as
+    # the first. ERROR and TIMEOUT mean the tool never reached a conclusion, so
+    # they belong with the skips: those areas are simply unreviewed.
+    failed = [r for r in rows if r["status"] == "FAIL"]
     if failed:
-        lines += ["", "## Failing checks", ""]
+        lines += ["", "## Checks that found problems", ""]
         for row in failed:
-            lines.append("- `%s` — %s (exit `%s`) — see `tool-results/%s`" % (
-                row["check"], row["status"], row["exit_code"], pathlib.Path(row["log"]).name,
+            lines.append("- `%s` — exit `%s` — see `tool-results/%s`" % (
+                row["check"], row["exit_code"], pathlib.Path(row["log"]).name,
             ))
+
+    no_verdict = [r for r in rows if r["status"] in ("SKIPPED", "ERROR", "TIMEOUT")]
+    if no_verdict:
+        lines += ["", "## Unreviewed areas", "",
+                  "These produced **no evidence either way**. A clean report is only as "
+                  "complete as this list is short.", ""]
+        for row in no_verdict:
+            detail = row["detail"] or "no reason recorded"
+            if row["status"] == "SKIPPED":
+                lines.append("- `%s` — skipped: %s" % (row["check"], detail))
+            else:
+                lines.append(
+                    "- `%s` — **%s**, so it reviewed nothing: %s — see `tool-results/%s`"
+                    % (row["check"], row["status"], detail,
+                       pathlib.Path(row["log"]).name if row["log"] != "-" else "n/a"))
 
     lines += [
         "", "## Next step: AI investigation", "",

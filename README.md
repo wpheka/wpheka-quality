@@ -79,6 +79,7 @@ bin/wpheka-quality --repo . --fail-on-severity high --format json
 | `--baseline FILE` | Suppress findings recorded in a baseline |
 | `--write-baseline` | Record the current findings to `--baseline` and exit 0 |
 | `--jobs N` | Parallelism for file-level checks (default: CPU count) |
+| `--all-sniffs` | Report every WPCS sniff, including whitespace and layout |
 | `--allow-repo-commands` | Honour a `commands:` block in the target repo's own config |
 | `--format` | Terminal output: `text`, `json`, `html` |
 | `--output-dir PATH` | Report directory |
@@ -119,7 +120,7 @@ finding survives unrelated edits that shift it up or down the file.
 |---|---|---|
 | `php_syntax` | `php` present and PHP files tracked | `php -l` exit code |
 | `git_diff_check` | Inside a git work tree | `git diff --check` |
-| `phpcs` | phpcs on PATH or in `vendor/bin` | exit 3 = tool failure |
+| `phpcs` | phpcs on PATH or in `vendor/bin` | 0/1/2 = ran; anything else = tool failure |
 | `phpstan` | phpstan present **and** a `phpstan.neon(.dist)` exists | exit code |
 | `phpunit` | phpunit present **and** a `phpunit.xml(.dist)` exists | exit code |
 | `composer_validate` | `composer.json` present | exit code |
@@ -156,6 +157,36 @@ reporting tool, so corroboration is visible rather than counted twice.
 
 Severities are normalised across tools onto `CRITICAL | HIGH | MEDIUM | LOW |
 INFO`, so a semgrep `ERROR` and a phpcs `ERROR` rank consistently.
+
+Checks that produced **no verdict** — `SKIPPED`, `ERROR`, `TIMEOUT` — are listed
+under "Unreviewed areas" rather than beside checks that found problems. A tool
+that was killed halfway did not review your code, and should not read as though
+it did.
+
+## phpcs rulesets
+
+By default the engine runs phpcs with formatting-only sniffs excluded
+(`config/phpcs-default.xml`). Measured on a real plugin, the full WordPress
+standard produced 1427 findings, of which ~1200 were indentation and bracket
+spacing; the default ruleset reports 157 and loses none of the 49 security and
+correctness findings buried underneath.
+
+| Situation | Ruleset used |
+|---|---|
+| Repository ships `phpcs.xml(.dist)` or `.phpcs.xml(.dist)` | The repository's own, always |
+| `WPHEKA_PHPCS_STANDARD` set | That standard |
+| `--all-sniffs` | `config/phpcs-all-sniffs.xml` — WPCS untouched |
+| Otherwise | `config/phpcs-default.xml` |
+
+Which one was used is printed beside the check, because a ruleset that silently
+drops sniffs is indistinguishable from a codebase with no problems.
+
+Use `--all-sniffs` when the question is conformance — a wordpress.org
+submission, or a formatting pass with phpcbf. Do not use it to hunt for defects.
+
+phpcs runs with `memory_limit=1G` (`WPHEKA_PHPCS_MEMORY_LIMIT` to change it);
+PHP's default exhausts on a large tree and surfaces as a fatal error rather
+than as findings.
 
 ## CI
 

@@ -29,6 +29,17 @@ HAVE_PHP = shutil.which("php") is not None
 HAVE_GIT = shutil.which("git") is not None
 
 
+def find_phpcs():
+    """phpcs may be global or Composer-local. The engine checks both, so the
+    tests must too, or they skip silently on a repo that keeps it in
+    vendor/bin -- and a silent skip is what this project refuses elsewhere."""
+    found = shutil.which("phpcs")
+    if found:
+        return found
+    local = ROOT_DIR / "vendor" / "bin" / "phpcs"
+    return str(local) if local.is_file() and os.access(str(local), os.X_OK) else None
+
+
 def run(cmd, **kwargs):
     kwargs.setdefault("capture_output", True)
     kwargs.setdefault("text", True)
@@ -366,6 +377,33 @@ class TestRenderer(unittest.TestCase):
                        "--baseline", baseline])
             self.assertEqual(json.loads(res.stdout)["findings"], [])
 
+    def test_regression_no_verdict_checks_are_not_listed_as_failures(self):
+        # ERROR and TIMEOUT mean the tool reached no conclusion. Listing them
+        # beside FAIL reads as "it ran and found problems", which is the exact
+        # confusion the engine exists to prevent.
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = pathlib.Path(tmp) / "tool-results"
+            raw.mkdir(parents=True)
+            (raw / "a.log").write_text("x")
+            log = str(raw / "a.log")
+            (pathlib.Path(tmp) / "results.tsv").write_text(
+                "phpcs\tFAIL\t%s\t1\tfound issues\n"
+                "semgrep\tTIMEOUT\t%s\t124\texceeded 900s\n"
+                "php_syntax\tERROR\t%s\t1\tunreadable files\n"
+                "gitleaks\tSKIPPED\t-\t-\tgitleaks not installed\n" % (log, log, log))
+            res = run([sys.executable, RENDERER, tmp, FIXTURE_DIR, "json", "--version", "test"])
+            self.assertEqual(res.returncode, 0, res.stderr)
+            summary = (pathlib.Path(tmp) / "summary.md").read_text()
+
+            found = summary.split("## Checks that found problems", 1)[1].split("##", 1)[0]
+            unreviewed = summary.split("## Unreviewed areas", 1)[1]
+
+            self.assertIn("phpcs", found)
+            for check in ("semgrep", "php_syntax", "gitleaks"):
+                self.assertNotIn(check, found, "%s produced no verdict" % check)
+                self.assertIn(check, unreviewed)
+            self.assertIn("reviewed nothing", unreviewed)
+
     def test_legacy_four_column_results_still_render(self):
         with tempfile.TemporaryDirectory() as tmp:
             (pathlib.Path(tmp) / "tool-results").mkdir()
@@ -416,6 +454,85 @@ class TestCli(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertNotIn("unknown", res.stdout)
             self.assertNotIn("missing", res.stderr)
+
+    def test_regression_phpcs_memory_limit_cannot_inject_a_command(self):
+        # The 1.2.0 work interpolated WPHEKA_PHPCS_MEMORY_LIMIT straight into
+        # the phpcs command string, which runs through `bash -c`. Exporting
+        # "1G; touch FILE" executed that command -- the same class of defect as
+        # the config eval this engine was built to avoid.
+        marker = pathlib.Path(tempfile.gettempdir()) / "wq-memlimit-injection.txt"
+        if marker.exists():
+            marker.unlink()
+        res = run([RUNNER, "--repo", str(FIXTURE_DIR), "--only", "phpcs", "--no-color", "--quiet"],
+                  env=dict(os.environ,
+                           WPHEKA_PHPCS_MEMORY_LIMIT="1G; touch %s" % marker))
+        self.assertFalse(marker.exists(), "memory limit value reached the shell")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("invalid WPHEKA_PHPCS_MEMORY_LIMIT", res.stderr)
+
+    def test_phpcs_memory_limit_accepts_valid_php_literals(self):
+        for value in ("1G", "512M", "2048", "-1"):
+            res = run([RUNNER, "--repo", str(FIXTURE_DIR), "--list-checks"],
+                      env=dict(os.environ, WPHEKA_PHPCS_MEMORY_LIMIT=value))
+            self.assertEqual(res.returncode, 0, "%s should be accepted: %s" % (value, res.stderr))
+
+    def test_bundled_phpcs_rulesets_are_valid(self):
+        # Every excluded sniff name must exist, or phpcs aborts with
+        # "Referenced sniff ... does not exist" and the check reports a tool
+        # failure instead of reviewing anything.
+        phpcs = find_phpcs()
+        if not phpcs:
+            self.skipTest("phpcs not installed (checked PATH and vendor/bin)")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "t.php"
+            target.write_text("<?php\n$a = 1;\n")
+            for name in ("phpcs-default.xml", "phpcs-all-sniffs.xml"):
+                ruleset = ROOT_DIR / "config" / name
+                self.assertTrue(ruleset.exists(), "%s missing" % name)
+                res = run([phpcs, "--standard=%s" % ruleset, "-q", str(target)])
+                self.assertNotIn("does not exist", res.stdout + res.stderr,
+                                 "%s references a sniff that is not installed" % name)
+                self.assertLessEqual(res.returncode, 2,
+                                     "%s failed to load: %s" % (name, res.stdout))
+
+    def test_default_ruleset_drops_layout_but_keeps_security_sniffs(self):
+        phpcs = find_phpcs()
+        if not phpcs:
+            self.skipTest("phpcs not installed (checked PATH and vendor/bin)")
+        # Badly formatted (tabs/spaces, spacing) *and* genuinely unsafe: the
+        # unescaped echo of a superglobal must survive the exclusions.
+        source = (
+            "<?php\n"
+            "function wq_demo() {\n"
+            "    $x = array( 1,2 );\n"
+            "    echo $_GET['q'];\n"
+            "}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "demo.php"
+            target.write_text(source)
+
+            def sniffs(ruleset):
+                res = run([phpcs, "--standard=%s" % (ROOT_DIR / "config" / ruleset),
+                           "--report=json", "-q", str(target)])
+                try:
+                    data = json.loads(res.stdout)
+                except ValueError:
+                    self.fail("phpcs produced no JSON for %s: %s" % (ruleset, res.stdout[:200]))
+                return [m["source"] for f in data.get("files", {}).values()
+                        for m in f.get("messages", [])]
+
+            default = sniffs("phpcs-default.xml")
+            everything = sniffs("phpcs-all-sniffs.xml")
+
+            self.assertLess(len(default), len(everything),
+                            "the default ruleset must be quieter than all sniffs")
+            self.assertTrue(any("WhiteSpace" in s or "Spacing" in s for s in everything),
+                            "fixture should trip layout sniffs under the full standard")
+            self.assertFalse(any("WhiteSpace" in s for s in default),
+                             "whitespace sniffs must be excluded by default: %s" % default)
+            self.assertTrue(any("EscapeOutput" in s for s in default),
+                            "security sniffs must survive the exclusions: %s" % default)
 
     def test_doctor_reports_toolchain(self):
         res = run([RUNNER, "--doctor"])

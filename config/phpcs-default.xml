@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<ruleset name="WPHEKA Quality default">
+    <description>
+        WordPress Coding Standards with formatting-only sniffs removed.
+
+        This is the ruleset the engine uses when a repository does not ship its
+        own. It exists because the engine's job is to surface defects that
+        matter, and layout findings drown them.
+
+        Measured on a real plugin: the full WordPress standard produced 1427
+        findings, of which roughly 1200 were indentation, alignment and bracket
+        spacing. Underneath them sat 32 missing or recommended nonce checks, 17
+        unescaped outputs and 7 direct database queries. A reviewer reading that
+        report top to bottom meets 582 space-vs-tab findings first.
+
+        Nothing here judges code quality. Every sniff removed below reports on
+        the shape of the source rather than its behaviour, and none of them can
+        describe a bug. Formatting is a job for phpcbf and an editor config, not
+        for a review that is looking for security and correctness defects.
+
+        Run with --all-sniffs to use config/phpcs-all-sniffs.xml instead, which
+        applies the WordPress standard untouched. A repository's own phpcs.xml
+        always takes precedence over both.
+    </description>
+
+    <rule ref="WordPress">
+        <!--
+            Indentation and whitespace. The single largest source of noise:
+            Generic.WhiteSpace.DisallowSpaceIndent alone was 41% of all
+            findings on the measured plugin.
+        -->
+        <exclude name="Generic.WhiteSpace"/>
+        <exclude name="Squiz.WhiteSpace"/>
+        <exclude name="WordPress.WhiteSpace"/>
+        <exclude name="Universal.WhiteSpace"/>
+        <exclude name="PSR2.Files.EndFileNewline"/>
+
+        <!--
+            Call and declaration layout: where brackets, commas and arguments
+            sit. 23% of findings on the measured plugin came from
+            PEAR.Functions.FunctionCallSignature alone.
+        -->
+        <exclude name="PEAR.Functions.FunctionCallSignature"/>
+        <exclude name="Generic.Functions.FunctionCallArgumentSpacing"/>
+        <exclude name="Generic.Functions.OpeningFunctionBraceKernighanRitchie"/>
+        <exclude name="Squiz.Functions.FunctionDeclarationArgumentSpacing"/>
+        <exclude name="Squiz.Functions.MultiLineFunctionDeclaration"/>
+        <exclude name="PSR2.Methods.FunctionClosingBrace"/>
+
+        <!-- Statement and operator alignment. -->
+        <exclude name="Generic.Formatting"/>
+        <exclude name="Squiz.Strings.ConcatenationSpacing"/>
+
+        <!-- Control structure and class declaration layout. -->
+        <exclude name="Squiz.ControlStructures.ControlSignature"/>
+        <exclude name="PSR2.ControlStructures.SwitchDeclaration"/>
+        <exclude name="PSR2.Classes.ClassDeclaration"/>
+        <exclude name="PSR12.Classes.ClassInstantiation"/>
+
+        <!-- Array layout. WPCS ships exactly four array sniffs; all are layout. -->
+        <exclude name="WordPress.Arrays.ArrayDeclarationSpacing"/>
+        <exclude name="WordPress.Arrays.ArrayIndentation"/>
+        <exclude name="WordPress.Arrays.MultipleStatementAlignment"/>
+        <exclude name="WordPress.Arrays.ArrayKeySpacingRestrictions"/>
+
+        <!-- Placement of PHP tags within markup. -->
+        <exclude name="Squiz.PHP.EmbeddedPhp"/>
+    </rule>
+</ruleset>

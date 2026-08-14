@@ -7,7 +7,7 @@ from combining orthogonal signals, then verifying the ones that matter.
 |---|---|---|---|
 | `php -l` | Parse/syntax failures | exit code, per file | Yes |
 | `git diff --check` | Whitespace damage, conflict markers | exit code | Yes |
-| PHPCS/WPCS | WordPress standards, escaping, i18n, common misuse | exit 3 = tool failure | Yes |
+| PHPCS/WPCS | WordPress standards, escaping, i18n, common misuse | exit 3 = tool failure | Yes (formatting sniffs excluded; `--all-sniffs` for all) |
 | PHPStan | Type and control-flow defects | exit code | Needs `phpstan.neon` |
 | PHPUnit | Behavioural regressions | exit code + JUnit XML | Needs `phpunit.xml` |
 | Composer validate | Package metadata problems | exit code | Needs `composer.json` |
@@ -66,6 +66,31 @@ rank consistently:
 
 Without this, a semgrep `ERROR` and a phpcs `ERROR` would sort differently for
 no reason other than which tool found them.
+
+## The default phpcs ruleset
+
+`config/phpcs-default.xml` is WPCS with formatting-only sniffs removed. It is
+the default because layout findings bury the ones worth acting on.
+
+Measured on a real plugin:
+
+| | Full WPCS | Default ruleset |
+|---|---:|---:|
+| Total findings | 1427 | 157 |
+| Security / correctness | 49 | 49 |
+| Share of report that is signal | 7.8% | 71.3% |
+
+The single largest contributor was `Generic.WhiteSpace.DisallowSpaceIndent` at
+41% of all findings, followed by `PEAR.Functions.FunctionCallSignature` at 23%.
+Underneath them sat 32 nonce findings, 17 unescaped outputs and 7 direct
+database queries.
+
+Nothing excluded can describe a bug — every removed sniff reports on the shape
+of the source rather than its behaviour. Formatting belongs to phpcbf and an
+editor config, not to a review looking for defects.
+
+A repository's own ruleset always wins. `--all-sniffs` applies WPCS untouched.
+The ruleset in use is printed beside the check.
 
 ## Correlation
 

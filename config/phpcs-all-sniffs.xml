@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<ruleset name="WPHEKA Quality all sniffs">
+    <description>
+        The WordPress Coding Standards, applied whole.
+
+        Selected with --all-sniffs. Use it when the question is "does this
+        conform to WPCS", for example before a wordpress.org submission or when
+        preparing a formatting pass with phpcbf.
+
+        Do not use it to look for defects. It reports layout alongside
+        behaviour and, on a codebase that has not been formatted to WPCS,
+        thousands of indentation findings will bury the handful that describe a
+        real problem. That is the reason config/phpcs-default.xml is the
+        default.
+    </description>
+
+    <rule ref="WordPress"/>
+</ruleset>

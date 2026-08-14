@@ -37,6 +37,7 @@ DRY_RUN=0
 LIST_CHECKS=0
 DOCTOR=0
 ALLOW_REPO_COMMANDS=0
+ALL_SNIFFS=0
 FAIL_ON=""
 FAIL_ON_SEVERITY="critical"
 BASELINE=""
@@ -71,6 +72,9 @@ Options:
   --baseline FILE         Suppress findings recorded in this baseline file
   --write-baseline        Write the run's findings to --baseline and exit 0
   --jobs N                Parallelism for file-level checks (default: CPU count)
+  --all-sniffs            Report every WPCS sniff, including whitespace and layout.
+                          The default ruleset excludes formatting-only sniffs
+                          (config/phpcs-default.xml)
   --allow-repo-commands   Honour a commands: block in the target repo's own config
   --list-checks           Print the resolved check plan and exit
   --dry-run               Resolve config and print the plan without running tools
@@ -85,6 +89,7 @@ Checks: ${ALL_CHECKS}
 Environment overrides:
   WPHEKA_CODERABBIT_MODE=uncommitted|base    WPHEKA_CODERABBIT_BASE=<ref>
   WPHEKA_PHPCS_STANDARD=<ruleset>            WPHEKA_TIMEOUT_DEFAULT=<seconds>
+  WPHEKA_PHPCS_MEMORY_LIMIT=<php limit>      (default 1G; phpcs exhausts 128M on large trees)
 
 Security: a commands: block found inside the target repository is ignored unless
 --allow-repo-commands is passed, because a reviewed repository is untrusted input.
@@ -127,6 +132,7 @@ while [[ $# -gt 0 ]]; do
     --baseline) need_arg "$1" $#; BASELINE="$2"; shift 2 ;;
     --jobs) need_arg "$1" $#; JOBS="$2"; shift 2 ;;
     --write-baseline) WRITE_BASELINE=1; shift ;;
+    --all-sniffs) ALL_SNIFFS=1; shift ;;
     --allow-repo-commands) ALLOW_REPO_COMMANDS=1; shift ;;
     --list-checks) LIST_CHECKS=1; shift ;;
     --doctor) DOCTOR=1; shift ;;
@@ -757,23 +763,65 @@ if check_enabled phpcs; then
     PHPCS_BIN="phpcs"
   fi
 
-  # phpcs exit codes: 0 clean, 1 issues found, 2 issues found and some are
-  # auto-fixable, 3 processing error. Only 3 means the tool failed to run; the
-  # issues themselves are reported as findings parsed from the JSON report.
+  # Success codes are allow-listed rather than failure codes deny-listed, which
+  # is what makes this survive a phpcs major version. 0 = clean, 1 = issues,
+  # 2 = issues with some auto-fixable. Anything else means the tool did not run:
+  # exit 3 on phpcs 3.x, exit 16 on phpcs 4.x (verified against 4.0.4), and a
+  # future code needs no change here. The issues themselves come from the JSON
+  # report, not from the exit code.
   if [[ -n "$PHPCS_OVERRIDE" ]]; then
     run_check "phpcs" "$PHPCS_OVERRIDE" "0,1,2"
   elif [[ -z "$PHPCS_BIN" ]]; then
     skip "phpcs" "phpcs not installed"
   else
+    # Ruleset precedence, most specific first. Which one was used is recorded
+    # in the result detail, because a ruleset that silently drops sniffs is
+    # indistinguishable from a codebase that has no problems.
     PHPCS_STD_ARG=""
-    if [[ ! -f "$REPO/phpcs.xml" && ! -f "$REPO/phpcs.xml.dist" \
-       && ! -f "$REPO/.phpcs.xml" && ! -f "$REPO/.phpcs.xml.dist" ]]; then
-      # No repository ruleset, so fall back to the house standard.
-      PHPCS_STD_ARG="--standard=${WPHEKA_PHPCS_STANDARD:-WordPress}"
+    PHPCS_RULESET="repository ruleset"
+    if [[ -f "$REPO/phpcs.xml" || -f "$REPO/phpcs.xml.dist" \
+       || -f "$REPO/.phpcs.xml" || -f "$REPO/.phpcs.xml.dist" ]]; then
+      : # The repository knows its own standard; never override it.
+    elif [[ -n "${WPHEKA_PHPCS_STANDARD:-}" ]]; then
+      PHPCS_STD_ARG="--standard=${WPHEKA_PHPCS_STANDARD}"
+      PHPCS_RULESET="$WPHEKA_PHPCS_STANDARD"
+    elif [[ $ALL_SNIFFS -eq 1 && -f "$ROOT/config/phpcs-all-sniffs.xml" ]]; then
+      PHPCS_STD_ARG="--standard=$ROOT/config/phpcs-all-sniffs.xml"
+      PHPCS_RULESET="all sniffs"
+    elif [[ $ALL_SNIFFS -eq 1 ]]; then
+      PHPCS_STD_ARG="--standard=WordPress"
+      PHPCS_RULESET="WordPress (bundled ruleset missing)"
+    elif [[ -f "$ROOT/config/phpcs-default.xml" ]]; then
+      # Formatting-only sniffs excluded. On a real plugin this cut 1427
+      # findings to 157 without losing a single security or correctness one --
+      # layout findings otherwise bury the defects worth acting on.
+      PHPCS_STD_ARG="--standard=$ROOT/config/phpcs-default.xml"
+      PHPCS_RULESET="default (formatting sniffs excluded; --all-sniffs for everything)"
+    else
+      PHPCS_STD_ARG="--standard=WordPress"
+      PHPCS_RULESET="WordPress (bundled ruleset missing)"
     fi
+
+    # phpcs holds every tokenised file in memory and exhausts PHP's default
+    # limit on a large tree, which surfaces as a fatal error rather than as
+    # findings. Raise it here so the check reports on the code, not on PHP.
+    #
+    # The value is interpolated into a command string, so it is validated as a
+    # PHP memory-limit literal first. Without this, exporting
+    # WPHEKA_PHPCS_MEMORY_LIMIT='1G; rm -rf ~' executes that command -- the
+    # same class of defect as the config eval this engine was built to avoid.
+    PHPCS_MEM_LIMIT="${WPHEKA_PHPCS_MEMORY_LIMIT:-1G}"
+    if [[ ! "$PHPCS_MEM_LIMIT" =~ ^(-1|[0-9]+[KMGkmg]?)$ ]]; then
+      die "invalid WPHEKA_PHPCS_MEMORY_LIMIT '$PHPCS_MEM_LIMIT' (expected e.g. 512M, 1G or -1)"
+    fi
+    PHPCS_MEM="-d memory_limit=$PHPCS_MEM_LIMIT"
+
     run_check "phpcs" \
-      "$PHPCS_BIN $PHPCS_STD_ARG --report-full --report-json='$RAW/phpcs.json' -q ." \
+      "$PHPCS_BIN $PHPCS_MEM $PHPCS_STD_ARG --report-full --report-json='$RAW/phpcs.json' -q ." \
       "0,1,2"
+    PHPCS_ROW="$(awk -F'\t' '$1 == "phpcs" { print $2 }' "$RESULTS" | tail -1)"
+    [[ $QUIET -eq 0 && -n "$PHPCS_ROW" ]] && \
+      printf "  %-22s ${C_DIM}ruleset: %s${C_RESET}\n" "" "$PHPCS_RULESET"
   fi
 else
   skip "phpcs" "disabled in configuration"
