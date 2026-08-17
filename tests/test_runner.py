@@ -72,6 +72,12 @@ def make_git_repo(path, files):
 
 BASE_SKIPS = "--skip=coderabbit,semgrep,gitleaks,phpstan,phpunit,composer_validate,composer_audit,plugin_check,npm_lint,npm_test"
 
+# `skipped 'phpcs not installed'` reads in a CI summary exactly like passing, so
+# if an install step ever breaks the phpcs tests quietly stop running and the
+# job stays green. CI sets this to make that state fail loudly instead.
+if os.environ.get("WPHEKA_TESTS_REQUIRE_PHPCS") == "1" and find_phpcs() is None:
+    sys.exit("WPHEKA_TESTS_REQUIRE_PHPCS=1 but no phpcs on PATH or in vendor/bin")
+
 
 # ---------------------------------------------------------------------------
 # Configuration loader
@@ -476,6 +482,40 @@ class TestCli(unittest.TestCase):
                       env=dict(os.environ, WPHEKA_PHPCS_MEMORY_LIMIT=value))
             self.assertEqual(res.returncode, 0, "%s should be accepted: %s" % (value, res.stderr))
 
+    def test_regression_env_values_cannot_inject_commands(self):
+        # Every value interpolated into a command string is shell input.
+        # WPHEKA_PHPCS_STANDARD was unquoted; WPHEKA_SEMGREP_CONFIG was wrapped
+        # in single quotes, which a quote inside the value simply ends.
+        cases = [
+            ("WPHEKA_PHPCS_STANDARD", "WordPress; touch %s", "phpcs"),
+            ("WPHEKA_SEMGREP_CONFIG", "p/php'; touch %s; echo '", "semgrep"),
+        ]
+        for var, template, check in cases:
+            marker = pathlib.Path(tempfile.gettempdir()) / ("wq-inj-%s.txt" % check)
+            if marker.exists():
+                marker.unlink()
+            res = run([RUNNER, "--repo", str(FIXTURE_DIR), "--only", check,
+                       "--no-color", "--quiet"],
+                      env=dict(os.environ, **{var: template % marker}))
+            self.assertFalse(marker.exists(), "%s reached the shell" % var)
+            self.assertEqual(res.returncode, 2, "%s should be rejected" % var)
+            self.assertIn("invalid %s" % var, res.stderr)
+
+    def test_env_values_accept_legitimate_input(self):
+        for var, value in (("WPHEKA_PHPCS_STANDARD", "WordPress-Extra"),
+                           ("WPHEKA_SEMGREP_CONFIG", "p/php"),
+                           ("WPHEKA_SEMGREP_CONFIG", "https://example.test/r.yml"),
+                           ("WPHEKA_WP_PATH", "/tmp/a path/wp")):
+            res = run([RUNNER, "--repo", str(FIXTURE_DIR), "--list-checks"],
+                      env=dict(os.environ, **{var: value}))
+            self.assertEqual(res.returncode, 0, "%s=%s rejected: %s" % (var, value, res.stderr))
+
+    def test_regression_wp_path_rejects_a_quote(self):
+        res = run([RUNNER, "--repo", str(FIXTURE_DIR), "--list-checks"],
+                  env=dict(os.environ, WPHEKA_WP_PATH="/tmp/x'y"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("invalid WPHEKA_WP_PATH", res.stderr)
+
     def test_bundled_phpcs_rulesets_are_valid(self):
         # Every excluded sniff name must exist, or phpcs aborts with
         # "Referenced sniff ... does not exist" and the check reports a tool
@@ -716,6 +756,66 @@ class TestIntegration(unittest.TestCase):
                        "--skip=coderabbit,semgrep,phpstan,phpunit,composer_validate,"
                        "composer_audit,plugin_check,npm_lint,npm_test,phpcs"])
             self.assertEqual(res.returncode, 0)
+
+    def test_regression_a_tool_that_never_ran_is_error_not_fail(self):
+        # phpcs exit 3 (3.x) / 16 (4.x) / 255 (PHP fatal) mean it never started.
+        # run_check filed every non-pass code as FAIL, so a phpcs that died on a
+        # bad standard was reported as having read the code and disliked it --
+        # the engine's own central promise, broken by its own runner.
+        if find_phpcs() is None:
+            self.skipTest("phpcs not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_git_repo(pathlib.Path(tmp) / "r", {"a.php": "<?php\n$a = 1;\n"})
+            out = pathlib.Path(tempfile.mkdtemp())
+            run([RUNNER, "--repo", repo, "--only", "phpcs", "--output-dir", out,
+                 "--no-color", "--quiet"],
+                env=dict(os.environ, WPHEKA_PHPCS_STANDARD="DefinitelyNotAStandard"))
+            rows = dict(line.split("\t")[:2]
+                        for line in (out / "results.tsv").read_text().splitlines())
+            self.assertEqual(rows.get("phpcs"), "ERROR",
+                             "a tool that could not start must not report FAIL")
+            # And it must be reported as unreviewed, not as a finding.
+            summary = (out / "summary.md").read_text()
+            self.assertIn("phpcs", summary.split("## Unreviewed areas", 1)[1])
+
+    def test_regression_all_sniffs_warns_when_repository_ruleset_wins(self):
+        # The flag sat below the repository-ruleset branch, so on a target with
+        # its own phpcs.xml it was accepted and silently did nothing.
+        if find_phpcs() is None:
+            self.skipTest("phpcs not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_git_repo(pathlib.Path(tmp) / "r", {
+                "a.php": "<?php\n$a = 1;\n",
+                "phpcs.xml": '<?xml version="1.0"?>\n<ruleset name="x">'
+                             '<rule ref="PSR12"/></ruleset>\n',
+            })
+            out = pathlib.Path(tempfile.mkdtemp())
+            res = run([RUNNER, "--repo", repo, "--only", "phpcs", "--all-sniffs",
+                       "--output-dir", out, "--no-color", "--quiet"])
+            self.assertIn("--all-sniffs ignored", res.stderr,
+                          "an explicit instruction must take effect or say why not")
+
+    def test_regression_coderabbit_skips_when_only_untracked_files_changed(self):
+        # The gate used git_status_snapshot, which lists untracked files (-uall).
+        # `cr review --uncommitted` cannot see those, so an untracked file was
+        # enough to start a review of zero lines that exited 0 and recorded PASS.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_git_repo(pathlib.Path(tmp) / "r", {"a.php": "<?php\n$a = 1;\n"})
+            (repo / "untracked.txt").write_text("not tracked\n")
+            bin_dir = pathlib.Path(tmp) / "bin"
+            bin_dir.mkdir()
+            stub = bin_dir / "cr"
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
+            out = pathlib.Path(tempfile.mkdtemp())
+            run([RUNNER, "--repo", repo, "--only", "coderabbit", "--output-dir", out,
+                 "--no-color", "--quiet"],
+                env=dict(os.environ, PATH="%s:%s" % (bin_dir, os.environ.get("PATH", ""))))
+            cols = [l.split("\t") for l in (out / "results.tsv").read_text().splitlines()
+                    if l.startswith("coderabbit")][0]
+            self.assertEqual(cols[1], "SKIPPED",
+                             "reviewing zero lines must not record PASS")
+            self.assertIn("tracked", cols[4])
 
     def test_regression_custom_output_dir_inside_repo_is_not_a_mutation(self):
         # The integrity snapshot filtered the literal default report path, so a

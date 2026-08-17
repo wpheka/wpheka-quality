@@ -48,6 +48,8 @@ jobs:
         run: bin/wpheka-quality --doctor
 
       - name: Run the test suite
+        env:
+          WPHEKA_TESTS_REQUIRE_PHPCS: "1"   # a silent skip must not read as a pass
         run: python3 tests/test_runner.py
 
       - name: Audit the sample fixture end to end
@@ -100,4 +102,6 @@ jobs:
           phpcs -i | grep -q WordPress
 
       - name: Run the test suite on the minimum supported Python
+        env:
+          WPHEKA_TESTS_REQUIRE_PHPCS: "1"
         run: python3 tests/test_runner.py

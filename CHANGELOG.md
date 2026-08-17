@@ -1,5 +1,90 @@
 # Changelog
 
+## 1.3.0
+
+Nine defects found by auditing this engine against its sibling. Each was
+reproduced here before being fixed.
+
+### Security
+
+- **Command injection via three environment variables.**
+  `WPHEKA_PHPCS_STANDARD` was interpolated unquoted; `WPHEKA_SEMGREP_CONFIG` was
+  wrapped in single quotes, which a quote inside the value simply ends;
+  `WPHEKA_WP_PATH` had the same shape but was not reachable in practice. All
+  three are now validated at startup.
+
+  The 1.2.1 memory-limit guard fixed one variable. This is the same defect at
+  the interpolation point two lines above it, which is why the rule is now an
+  invariant in `CONTRIBUTING.md` rather than a note about one value: every
+  value interpolated into a command string is shell input, validated at
+  startup, never at the point of use.
+
+  These are operator input rather than repository input, so the exposure is
+  smaller than the config path the engine already defends. It matters where the
+  environment comes from CI configuration, a shared profile or a wrapper
+  script.
+
+### Fixed
+
+- **A phpcs that never ran was reported as `FAIL`.** `run_check` filed every
+  non-pass exit code as a failure, so phpcs dying on a bad standard (exit 3 on
+  3.x, 16 on 4.x) or on a PHP fatal (255, usually memory exhaustion) was
+  recorded as having read the code and reached a verdict.
+
+  This is the engine's central promise broken by its own runner, and the
+  comment above the phpcs block already said 3 and 16 mean the tool did not
+  run — the knowledge was in the comment and not in the code. `run_check` now
+  takes an optional list of exit codes meaning "could not complete", recorded
+  as `ERROR` and reported under "Unreviewed areas". The list is per-check
+  because exit 255 from `php -l` is a genuine parse error.
+
+- **`plugin_check` reported text domain mismatches that were not real.**
+  plugin-check reads the target argument as the plugin slug, so passing `.`
+  made it expect every text domain to equal `.`. On a real plugin that was 23
+  of 55 findings, every one an artifact, and indistinguishable from a genuine
+  i18n defect. The slug is now stated explicitly.
+
+  Verified that nothing is lost: the non-i18n findings are unchanged, and one
+  legitimate finding appears that could not be evaluated before — the
+  wordpress.org restricted-term rule applied to the slug itself. Older
+  plugin-check releases without `--slug` are detected and retried without it.
+
+- **`coderabbit` could pass having reviewed nothing.** The gate used a snapshot
+  that lists untracked files, which `cr review --uncommitted` cannot see, so an
+  untracked file was enough to start a review of zero lines that exited 0 and
+  recorded `PASS`. It now gates on `git diff --quiet HEAD`, which is what that
+  command actually reviews.
+
+- **`--all-sniffs` was accepted and silently ignored** on a repository carrying
+  its own `phpcs.xml`. The precedence is deliberate and stays; the silence does
+  not. Both `--all-sniffs` and `WPHEKA_PHPCS_STANDARD` now warn when the
+  repository's ruleset wins.
+
+- **`plugin_check` blamed the wrong thing when WordPress could not boot.**
+  `wp cli has-command` fails identically whether plugin-check is inactive or
+  the database is unreachable, and the skip reason sent people to reinstall a
+  plugin they already had. `core is-installed` is probed first.
+
+### Testing
+
+- The suite aborts when `WPHEKA_TESTS_REQUIRE_PHPCS=1` and no phpcs is found,
+  which both CI jobs now set. `skipped 'phpcs not installed'` reads in a CI
+  summary exactly like passing, so a broken install step would otherwise stop
+  the phpcs tests running while the job stayed green.
+- Regression tests for the injections, the `ERROR` status, the `--all-sniffs`
+  warning and the coderabbit gate.
+
+57 tests, green on Ubuntu, macOS, and Python 3.8.
+
+### Upgrading
+
+`plugin_check` output changes: text domain findings caused by the old
+invocation disappear, and one restricted-term finding may appear. Regenerate
+baselines that include plugin_check findings.
+
+A phpcs that fails to start now reports `ERROR` rather than `FAIL`. Both fail
+the run under the default `--fail-on error`, so gating is unaffected.
+
 ## 1.2.1
 
 ### Fixed

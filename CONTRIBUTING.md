@@ -24,6 +24,11 @@ the tests pass, so add a test rather than adjust one:
 6. Every skip records a reason.
 7. Tool output embedded in `report.html` cannot escape its context.
 8. Secret values discovered by scanners never reach any artifact.
+9. Every value interpolated into a command string is shell input, and is
+   validated at startup rather than at the point of use. Single-quoting an
+   interpolation is not validation: a quote inside the value ends the quoted
+   context. Validating at the point of use also means the guard vanishes
+   whenever that branch is skipped.
 
 ## Regression tests
 

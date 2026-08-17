@@ -39,6 +39,7 @@ Changes to `bin/wpheka-quality` must preserve these. Each has a regression test.
 6. Every skip records a reason.
 7. Tool output embedded in `report.html` cannot escape its context.
 8. Secret values discovered by scanners never reach any artifact.
+9. Every value interpolated into a command string is validated at startup.
 
 ## Reporting
 

@@ -90,6 +90,10 @@ Environment overrides:
   WPHEKA_CODERABBIT_MODE=uncommitted|base    WPHEKA_CODERABBIT_BASE=<ref>
   WPHEKA_PHPCS_STANDARD=<ruleset>            WPHEKA_TIMEOUT_DEFAULT=<seconds>
   WPHEKA_PHPCS_MEMORY_LIMIT=<php limit>      (default 1G; phpcs exhausts 128M on large trees)
+  WPHEKA_SEMGREP_CONFIG=<ruleset|path|url>   WPHEKA_WP_PATH=<wordpress root>
+
+All of the above are validated at startup: they are interpolated into command
+strings, so an unvalidated value is shell input.
 
 Security: a commands: block found inside the target repository is ignored unless
 --allow-repo-commands is passed, because a reviewed repository is untrusted input.
@@ -173,6 +177,27 @@ fi
 PHPCS_MEM_LIMIT="${WPHEKA_PHPCS_MEMORY_LIMIT:-1G}"
 if [[ ! "$PHPCS_MEM_LIMIT" =~ ^(-1|[0-9]+[KMGkmg]?)$ ]]; then
   die "invalid WPHEKA_PHPCS_MEMORY_LIMIT '$PHPCS_MEM_LIMIT' (expected e.g. 512M, 1G or -1)"
+fi
+
+# Every value the engine interpolates into a command string is shell input and
+# is validated here, not at the point of use. Wrapping an interpolation in
+# single quotes is not validation: a quote inside the value ends the quoted
+# context. These are operator input rather than repository input, so the
+# exposure is smaller than the config path the engine already defends -- but it
+# matters wherever the environment comes from CI config, a shared profile or a
+# wrapper script rather than being typed by hand.
+if [[ -n "${WPHEKA_PHPCS_STANDARD:-}" \
+   && ! "$WPHEKA_PHPCS_STANDARD" =~ ^[A-Za-z0-9._,/+-]+$ ]]; then
+  die "invalid WPHEKA_PHPCS_STANDARD '$WPHEKA_PHPCS_STANDARD' (expected a ruleset name or path)"
+fi
+if [[ -n "${WPHEKA_SEMGREP_CONFIG:-}" \
+   && ! "$WPHEKA_SEMGREP_CONFIG" =~ ^[A-Za-z0-9._:/@+-]+$ ]]; then
+  die "invalid WPHEKA_SEMGREP_CONFIG '$WPHEKA_SEMGREP_CONFIG' (expected a ruleset id, path or URL)"
+fi
+# A filesystem path may legitimately contain a space, so reject only what can
+# terminate the quoted context rather than imposing a character class.
+if [[ "${WPHEKA_WP_PATH:-}" == *"'"* ]]; then
+  die "invalid WPHEKA_WP_PATH: a single quote is not allowed in the path"
 fi
 
 [[ -d "$REPO" ]] || die "target repository does not exist: $REPO"
@@ -530,8 +555,14 @@ exec_with_timeout() {
 #
 # COMMAND runs with the target repository as the working directory. The exit
 # code decides the status, so no check can silently pass on a broken run.
+# run_check NAME COMMAND [PASS_CODES] [ERROR_CODES]
+#
+# ERROR_CODES lists exit codes meaning the tool could not complete. They are
+# recorded as ERROR, not FAIL, because FAIL asserts the tool read the code and
+# reached a verdict. The list is per-check and cannot be global: exit 255 from
+# `php -l` is a genuine parse error, while 255 from phpcs is a PHP fatal.
 run_check() {
-  local name="$1" cmd="$2" pass_codes="${3:-0}"
+  local name="$1" cmd="$2" pass_codes="${3:-0}" error_codes="${4:-}"
   local outfile="$RAW/${name}.log"
   local secs; secs="$(timeout_for "$name")"
   local started; started="$(date +%s)"
@@ -560,8 +591,19 @@ run_check() {
     [[ $rc -eq $code ]] && ok=0
   done
 
+  # Checked before FAIL: a tool that could not start has no verdict to report,
+  # and FAIL would assert that it read the code and disliked it.
+  local could_not_run=1
+  if [[ -n "$error_codes" ]]; then
+    for code in $(echo "$error_codes" | tr ',' ' '); do
+      [[ $rc -eq $code ]] && could_not_run=0
+    done
+  fi
+
   if [[ $ok -eq 0 ]]; then
     record "$name" "PASS" "$outfile" "$rc" "${elapsed}s"
+  elif [[ $could_not_run -eq 0 ]]; then
+    record "$name" "ERROR" "$outfile" "$rc" "tool could not run (exit $rc); nothing was reviewed"
   else
     record "$name" "FAIL" "$outfile" "$rc" "exit $rc after ${elapsed}s"
   fi
@@ -790,7 +832,15 @@ if check_enabled phpcs; then
     PHPCS_RULESET="repository ruleset"
     if [[ -f "$REPO/phpcs.xml" || -f "$REPO/phpcs.xml.dist" \
        || -f "$REPO/.phpcs.xml" || -f "$REPO/.phpcs.xml.dist" ]]; then
-      : # The repository knows its own standard; never override it.
+      # The repository knows its own standard; never override it. But an
+      # explicit operator instruction must either take effect or say why not,
+      # rather than being accepted and silently discarded.
+      if [[ $ALL_SNIFFS -eq 1 ]]; then
+        log_warn "phpcs: --all-sniffs ignored; the repository's own ruleset takes precedence"
+      fi
+      if [[ -n "${WPHEKA_PHPCS_STANDARD:-}" ]]; then
+        log_warn "phpcs: WPHEKA_PHPCS_STANDARD ignored; the repository's own ruleset takes precedence"
+      fi
     elif [[ -n "${WPHEKA_PHPCS_STANDARD:-}" ]]; then
       PHPCS_STD_ARG="--standard=${WPHEKA_PHPCS_STANDARD}"
       PHPCS_RULESET="$WPHEKA_PHPCS_STANDARD"
@@ -820,9 +870,12 @@ if check_enabled phpcs; then
     # here -- the same class of defect as the config eval this engine avoids.
     PHPCS_MEM="-d memory_limit=$PHPCS_MEM_LIMIT"
 
+    # 3 = phpcs 3.x could not run, 16 = the phpcs 4.x equivalent, 255 = PHP
+    # fatal, most often memory exhaustion on a large tree -- exactly when a
+    # reader most needs to know the check produced no evidence.
     run_check "phpcs" \
       "$PHPCS_BIN $PHPCS_MEM $PHPCS_STD_ARG --report-full --report-json='$RAW/phpcs.json' -q ." \
-      "0,1,2"
+      "0,1,2" "3,16,255"
     PHPCS_ROW="$(awk -F'\t' '$1 == "phpcs" { print $2 }' "$RESULTS" | tail -1)"
     [[ $QUIET -eq 0 && -n "$PHPCS_ROW" ]] && \
       printf "  %-22s ${C_DIM}ruleset: %s${C_RESET}\n" "" "$PHPCS_RULESET"
@@ -990,6 +1043,12 @@ if check_enabled plugin_check; then
     skip "plugin_check" "target is a WordPress installation, not a plugin directory"
   elif [[ -z "$WP_PATH" ]]; then
     skip "plugin_check" "no WordPress installation found above the plugin (set WPHEKA_WP_PATH)"
+  elif ! wp --path="$WP_PATH" core is-installed >/dev/null 2>&1; then
+    # Probed before has-command, which fails identically whether the plugin is
+    # inactive or WordPress could not boot at all. A frequent local cause is a
+    # database socket mismatch: MAMP places its socket outside the path a
+    # Homebrew PHP CLI looks in.
+    skip "plugin_check" "WordPress at $WP_PATH could not be loaded (database unreachable?)"
   elif ! wp --path="$WP_PATH" cli has-command "plugin check" >/dev/null 2>&1; then
     skip "plugin_check" "plugin-check is not active in $WP_PATH"
   else
@@ -999,9 +1058,31 @@ if check_enabled plugin_check; then
     if [[ "$ROOT_PHP_COUNT" -eq 0 ]]; then
       skip "plugin_check" "no PHP file at the repository root to identify a plugin"
     else
-      # wp-cli exits non-zero only on error; findings come from the JSON report.
+      # plugin-check treats the target argument as the plugin slug, so passing
+      # `.` makes it expect every text domain to equal "." -- reporting each
+      # correctly-domained string as a mismatch. Measured on a real plugin that
+      # was 23 of 55 findings, all artifacts. Naming the slug removes them and
+      # loses nothing; it also lets the slug itself be checked, which is where
+      # the wordpress.org restricted-term rule applies.
+      PC_SLUG="$(basename "$REPO")"
+      PC_SLUG_ARG=""
+      if [[ "$PC_SLUG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        PC_SLUG_ARG="--slug='$PC_SLUG'"
+      else
+        log_warn "plugin_check: '$PC_SLUG' is not a usable plugin slug; text domain findings may be wrong"
+      fi
+
+      # --slug is absent from older plugin-check releases. wp-cli rejects an
+      # unknown option before running anything, with "Parameter errors:" on
+      # stderr, so retry once without it rather than failing every user on an
+      # older release. wp-cli exits non-zero only on error; findings come from
+      # the JSON report.
       run_check "plugin_check" \
-        "wp --path='$WP_PATH' plugin check . --format=json > '$RAW/plugin-check.json' 2>'$RAW/plugin-check.stderr.log'; rc=\$?; cat '$RAW/plugin-check.stderr.log'; exit \$rc" \
+        "wp --path='$WP_PATH' plugin check . $PC_SLUG_ARG --format=json > '$RAW/plugin-check.json' 2>'$RAW/plugin-check.stderr.log'; rc=\$?; \
+         if [ \$rc -ne 0 ] && grep -q 'Parameter errors:' '$RAW/plugin-check.stderr.log'; then \
+           echo 'plugin-check does not support --slug; retrying without it' >&2; \
+           wp --path='$WP_PATH' plugin check . --format=json > '$RAW/plugin-check.json' 2>'$RAW/plugin-check.stderr.log'; rc=\$?; \
+         fi; cat '$RAW/plugin-check.stderr.log'; exit \$rc" \
         "0"
     fi
   fi
@@ -1069,8 +1150,13 @@ if check_enabled coderabbit; then
     CR_MODE="${WPHEKA_CODERABBIT_MODE:-uncommitted}"
     case "$CR_MODE" in
       uncommitted)
-        if [[ $IS_GIT -eq 1 && -z "$(git_status_snapshot)" ]]; then
-          skip "coderabbit" "no uncommitted changes to review"
+        # `cr review --uncommitted` reviews staged changes and tracked edits.
+        # git_status_snapshot lists untracked files too (-uall), which that
+        # command cannot see, so gating on it starts reviews of zero lines that
+        # then exit 0 and record PASS. The snapshot is right for
+        # repository_integrity and wrong here: same helper, different question.
+        if [[ $IS_GIT -eq 1 ]] && git -C "$REPO" diff --quiet HEAD 2>/dev/null; then
+          skip "coderabbit" "no staged or tracked changes to review"
         else
           run_check "coderabbit" "$CR_BIN review --uncommitted"
         fi
