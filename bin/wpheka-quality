@@ -563,6 +563,12 @@ exec_with_timeout() {
 # `php -l` is a genuine parse error, while 255 from phpcs is a PHP fatal.
 run_check() {
   local name="$1" cmd="$2" pass_codes="${3:-0}" error_codes="${4:-}"
+  # $5/$6: a log pattern that means "this tool refused to review anything", and
+  # the reason to record. Status normally comes from exit codes, never from
+  # scraping a log -- but a tool that reports "rate limited" and "I found bugs"
+  # with the same exit code leaves no other signal, and calling the first one
+  # FAIL asserts a verdict nobody produced.
+  local unavailable_pattern="${5:-}" unavailable_reason="${6:-}"
   local outfile="$RAW/${name}.log"
   local secs; secs="$(timeout_for "$name")"
   local started; started="$(date +%s)"
@@ -598,6 +604,16 @@ run_check() {
     for code in $(echo "$error_codes" | tr ',' ' '); do
       [[ $rc -eq $code ]] && could_not_run=0
     done
+  fi
+
+  # Before any verdict: a tool that declined to review has not passed and has not
+  # failed. SKIPPED is the status that says "this area is unreviewed", and the
+  # summary lists it as such rather than reporting a defect nobody found.
+  if [[ $ok -ne 0 && -n "$unavailable_pattern" ]] \
+    && grep -qiE "$unavailable_pattern" "$outfile" 2>/dev/null; then
+    record "$name" "SKIPPED" "$outfile" "$rc" \
+      "${unavailable_reason:-tool declined to review; nothing was reviewed}"
+    return 0
   fi
 
   if [[ $ok -eq 0 ]]; then
@@ -1147,6 +1163,7 @@ if check_enabled coderabbit; then
     # usage error in about two seconds and the check could never pass. Nothing
     # parses this output structurally -- the log is raw evidence, read only for
     # a rate-limit notice below -- so no output-format flag is needed.
+    CR_UNAVAILABLE="rate limit|too many requests|quota exceeded|review limit reached|all free CLI reviews"
     CR_MODE="${WPHEKA_CODERABBIT_MODE:-uncommitted}"
     case "$CR_MODE" in
       uncommitted)
@@ -1158,7 +1175,7 @@ if check_enabled coderabbit; then
         if [[ $IS_GIT -eq 1 ]] && git -C "$REPO" diff --quiet HEAD 2>/dev/null; then
           skip "coderabbit" "no staged or tracked changes to review"
         else
-          run_check "coderabbit" "$CR_BIN review --uncommitted"
+          run_check "coderabbit" "$CR_BIN review --uncommitted" "0" "" "$CR_UNAVAILABLE" "review limit reached; nothing was reviewed (the free tier allows 3 per hour)"
         fi
         ;;
       base)
@@ -1178,7 +1195,7 @@ if check_enabled coderabbit; then
         elif ! git -C "$REPO" rev-parse --verify "$CR_BASE" >/dev/null 2>&1; then
           skip "coderabbit" "base ref not found: $CR_BASE"
         else
-          run_check "coderabbit" "$CR_BIN review --base '$CR_BASE'"
+          run_check "coderabbit" "$CR_BIN review --base '$CR_BASE'" "0" "" "$CR_UNAVAILABLE" "review limit reached; nothing was reviewed (the free tier allows 3 per hour)"
         fi
         ;;
       *)

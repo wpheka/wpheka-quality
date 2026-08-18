@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.1
+
+### Fixed
+
+- **A rate-limited CodeRabbit review was reported as `FAIL`.** The CLI exits 1
+  both when it finds problems and when it refuses to review at all, so "you have
+  used all 3 included reviews" was recorded as a defect nobody found. Any gate
+  running more than three times an hour then went red for a reason that was not
+  the code — and a permanently red check teaches people to ignore red exactly as
+  a permanently skipped one teaches them to ignore the skip list.
+
+  A tool that declined to review has not passed and has not failed. It is now
+  recorded as `SKIPPED` with the reason, which is the status this engine already
+  uses for "that area is unreviewed", and the summary lists it among the
+  unreviewed areas.
+
+  `run_check()` takes an optional log pattern and reason for this. Status still
+  comes from exit codes everywhere it can — but a tool that reports "rate
+  limited" and "I found bugs" with the same code leaves no other signal, and
+  calling the first one FAIL asserts a verdict nobody produced.
+
 ## 1.3.0
 
 Nine defects found by auditing this engine against its sibling. Each was

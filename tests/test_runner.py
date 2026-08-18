@@ -877,6 +877,49 @@ class TestIntegration(unittest.TestCase):
             self.assertNotIn("--plain", argv, "no such option; it is a usage error")
             self.assertNotIn("--type", argv, "no such option; it is a usage error")
 
+    @unittest.skipUnless(HAVE_GIT, "git required")
+    def test_regression_a_rate_limited_review_is_not_a_failure(self):
+        # CodeRabbit exits 1 both when it finds problems and when it refuses to
+        # review at all, so the engine reported "used all 3 included reviews" as
+        # FAIL -- asserting a verdict nobody produced. Any gate running more than
+        # three times an hour then went red for a reason that was not the code,
+        # which teaches people to ignore red. A tool that declined to review has
+        # not passed and has not failed: SKIPPED is the status that says the area
+        # is unreviewed, and the summary lists it as such.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            repo = make_git_repo(root / "r", {"a.php": "<?php\n$a = 1;\n"})
+            (repo / "a.php").write_text("<?php\n$a = 2;\n")
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            stub = bin_dir / "cr"
+            stub.write_text(
+                "#!/bin/sh\n"
+                "echo '  x Review limit reached'\n"
+                "echo \"You've used all free CLI reviews for now.\"\n"
+                "echo 'Error: Rate limit exceeded'\n"
+                "exit 1\n")
+            stub.chmod(0o755)
+
+            out = pathlib.Path(tempfile.mkdtemp())
+            env = dict(os.environ, PATH="%s:%s" % (bin_dir, os.environ.get("PATH", "")))
+            res = run([RUNNER, "--repo", repo, "--output-dir", out, "--no-color",
+                       "--quiet", "--only", "coderabbit"], env=env)
+
+            rows = {}
+            for line in (out / "results.tsv").read_text().splitlines():
+                cols = line.split("\t")
+                rows[cols[0]] = (cols[1], cols[4] if len(cols) > 4 else "")
+
+            self.assertIn("coderabbit", rows)
+            status, detail = rows["coderabbit"]
+            self.assertEqual(status, "SKIPPED",
+                             "a refused review must not be reported as a defect")
+            self.assertIn("limit", detail.lower())
+            self.assertEqual(res.returncode, 0,
+                             "an unreviewed area must not fail the gate as if it found bugs")
+
     def test_empty_repository_does_not_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = pathlib.Path(tmp) / "empty"
