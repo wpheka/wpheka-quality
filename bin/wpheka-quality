@@ -886,11 +886,41 @@ if check_enabled phpcs; then
     # here -- the same class of defect as the config eval this engine avoids.
     PHPCS_MEM="-d memory_limit=$PHPCS_MEM_LIMIT"
 
+    # phpcs is handed the directory rather than the filtered file list that
+    # php_syntax builds, so without this it walks straight through `exclude`.
+    # A plugin bundling vendored code it does not own -- a framework reviewed in
+    # its own repo, under its own ruleset -- then gets that code's findings
+    # reported against it. They are noise at best, and they bury the plugin's
+    # own findings in the same report.
+    #
+    # Both patterns are emitted per entry because an exclude may name a
+    # directory or a single file, and phpcs matches these against the full path.
+    PHPCS_IGNORE_ARG=""
+    if [[ -n "${WPHEKA_CFG_EXCLUDE:-}" ]]; then
+      PHPCS_IGNORE_PATTERNS="$(python3 <<'PYIGN'
+import os
+seen, out = set(), []
+for raw in os.environ.get("WPHEKA_CFG_EXCLUDE", "").splitlines():
+    entry = raw.strip().rstrip("/")
+    # A comma would be read by phpcs as a pattern separator and split the entry.
+    if not entry or "," in entry or entry in seen:
+        continue
+    seen.add(entry)
+    out.append("*/%s/*" % entry)
+    out.append("*/%s" % entry)
+print(",".join(out))
+PYIGN
+)"
+      if [[ -n "$PHPCS_IGNORE_PATTERNS" ]]; then
+        PHPCS_IGNORE_ARG="--ignore='$PHPCS_IGNORE_PATTERNS'"
+      fi
+    fi
+
     # 3 = phpcs 3.x could not run, 16 = the phpcs 4.x equivalent, 255 = PHP
     # fatal, most often memory exhaustion on a large tree -- exactly when a
     # reader most needs to know the check produced no evidence.
     run_check "phpcs" \
-      "$PHPCS_BIN $PHPCS_MEM $PHPCS_STD_ARG --report-full --report-json='$RAW/phpcs.json' -q ." \
+      "$PHPCS_BIN $PHPCS_MEM $PHPCS_STD_ARG $PHPCS_IGNORE_ARG --report-full --report-json='$RAW/phpcs.json' -q ." \
       "0,1,2" "3,16,255"
     PHPCS_ROW="$(awk -F'\t' '$1 == "phpcs" { print $2 }' "$RESULTS" | tail -1)"
     [[ $QUIET -eq 0 && -n "$PHPCS_ROW" ]] && \

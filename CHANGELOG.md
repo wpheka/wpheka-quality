@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.2
+
+### Fixed
+
+- **`exclude` did nothing for phpcs.** The `php_syntax` check builds a file list
+  and filters it against `exclude`; phpcs was handed the directory instead and
+  walked straight through it. A plugin bundling code it does not own — a
+  framework reviewed in its own repository, under its own ruleset — had that
+  code's findings reported against the plugin.
+
+  Measured on a plugin bundling the WPHEKA framework: 109 findings, 23 of them
+  from `framework/`, every one a `WordPress.Files.FileName` sniff firing on
+  deliberately PSR-4 filenames. After the fix, 86 findings and none from
+  `framework/`, with the plugin's own 78 phpcs findings untouched.
+
+  Noise like that is worse than it looks. It is not merely 23 rows to scroll
+  past: it teaches the reader that this report contains findings they are
+  supposed to ignore, which is the habit that loses the twenty-fourth.
+
+  Excludes are translated into phpcs `--ignore` patterns, two per entry, since
+  an exclude may name a directory or a single file. An entry containing a comma
+  is dropped rather than passed through, because phpcs would read the comma as a
+  pattern separator and split it into two wrong patterns.
+
 ## 1.3.1
 
 ### Fixed
