@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.3
+
+### Fixed
+
+- **`exclude` did nothing for plugin-check either.** 1.3.2 fixed this for phpcs;
+  plugin-check walks the directory the same way and was still reporting a
+  bundled framework's findings against the plugin that bundles it. Measured on
+  `wpheka-request-for-quote`: six `DirectDB` findings from bundled
+  `Database/Repository.php` and `Schema.php`, code reviewed in its own
+  repository. After the fix, zero — while plugin-check still reports its 44
+  findings on the plugin's own code, so the change narrowed the check rather
+  than silencing it.
+
+  Excludes become `--exclude-directories`. That option takes bare directory
+  names, so an entry naming a file, or containing a path separator, is skipped
+  rather than passed through as something plugin-check would quietly fail to
+  match. The existing retry-without-`--slug` fallback now also drops
+  `--exclude-directories`, since older plugin-check releases reject unknown
+  options before running anything.
+
+  Two tools ignoring the same configuration key, found a few hours apart,
+  suggests the key needs a single place that applies it rather than each check
+  remembering to.
+
 ## 1.3.2
 
 ### Fixed

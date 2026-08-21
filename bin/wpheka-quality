@@ -1118,15 +1118,43 @@ if check_enabled plugin_check; then
         log_warn "plugin_check: '$PC_SLUG' is not a usable plugin slug; text domain findings may be wrong"
       fi
 
+      # plugin-check walks the whole directory too, so `exclude` has to reach it
+      # as well -- otherwise a plugin bundling a framework gets that framework's
+      # findings reported against it, which is what happened to
+      # wpheka-request-for-quote: six DirectDB findings from bundled
+      # Database/Repository.php and Schema.php, code reviewed in its own repo.
+      #
+      # --exclude-directories takes bare directory names, so entries naming a
+      # file, or a path with a separator in it, are skipped rather than passed
+      # through as something plugin-check would silently not match.
+      PC_EXCLUDE_ARG=""
+      if [[ -n "${WPHEKA_CFG_EXCLUDE:-}" ]]; then
+        PC_EXCLUDE_DIRS="$(python3 <<'PYPC'
+import os
+seen, out = set(), []
+for raw in os.environ.get("WPHEKA_CFG_EXCLUDE", "").splitlines():
+    entry = raw.strip().rstrip("/")
+    if not entry or "," in entry or "/" in entry or entry in seen:
+        continue
+    seen.add(entry)
+    out.append(entry)
+print(",".join(out))
+PYPC
+)"
+        if [[ -n "$PC_EXCLUDE_DIRS" ]]; then
+          PC_EXCLUDE_ARG="--exclude-directories='$PC_EXCLUDE_DIRS'"
+        fi
+      fi
+
       # --slug is absent from older plugin-check releases. wp-cli rejects an
       # unknown option before running anything, with "Parameter errors:" on
       # stderr, so retry once without it rather than failing every user on an
       # older release. wp-cli exits non-zero only on error; findings come from
       # the JSON report.
       run_check "plugin_check" \
-        "wp --path='$WP_PATH' plugin check . $PC_SLUG_ARG --format=json > '$RAW/plugin-check.json' 2>'$RAW/plugin-check.stderr.log'; rc=\$?; \
+        "wp --path='$WP_PATH' plugin check . $PC_SLUG_ARG $PC_EXCLUDE_ARG --format=json > '$RAW/plugin-check.json' 2>'$RAW/plugin-check.stderr.log'; rc=\$?; \
          if [ \$rc -ne 0 ] && grep -q 'Parameter errors:' '$RAW/plugin-check.stderr.log'; then \
-           echo 'plugin-check does not support --slug; retrying without it' >&2; \
+           echo 'plugin-check rejected an option; retrying with neither --slug nor --exclude-directories' >&2; \
            wp --path='$WP_PATH' plugin check . --format=json > '$RAW/plugin-check.json' 2>'$RAW/plugin-check.stderr.log'; rc=\$?; \
          fi; cat '$RAW/plugin-check.stderr.log'; exit \$rc" \
         "0"
