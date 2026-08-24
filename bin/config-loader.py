@@ -35,6 +35,11 @@ KNOWN_CHECKS = {
     "semgrep": True,
     "gitleaks": True,
     "plugin_check": True,
+    # Both default on: each exists because a real release shipped the defect it
+    # catches. url_headers makes network requests, which is already true of
+    # coderabbit, and it reports "could not tell" offline rather than failing.
+    "i18n_pot": True,
+    "url_headers": True,
     "npm_lint": False,
     "npm_test": False,
     "coderabbit": True,

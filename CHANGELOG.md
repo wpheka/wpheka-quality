@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.4.0
+
+### Added
+
+- **`i18n_pot` — the translation template must match the code.** A `.pot` goes
+  stale silently, and one plugin shipped or nearly shipped a stale one three
+  releases running, each time because regenerating it is a step a person has to
+  remember. The check generates a fresh template and compares it with the one in
+  the repository.
+
+  Compared by **msgid, not file contents**. A `.pot` carries `#:` source
+  references and a creation date that change whenever anything moves, so a
+  content diff would report drift on every run — and a check that always
+  complains is one people learn to ignore. Missing strings are `MEDIUM`; strings
+  the code no longer contains are `LOW`, since they mislead translators without
+  breaking anything.
+
+  Honours the configured `exclude` list, so a bundled framework is not scanned
+  for strings belonging to its own repository. Skips when there is no `.pot`, no
+  wp-cli, or no plugin header — a repository that has never had a template is not
+  failing, it simply has nothing to compare.
+
+- **`url_headers` — the URLs a plugin advertises must resolve.** Plugin Check
+  validates the donate link's syntax and that `Domain Path` names a real folder,
+  but nothing checks that `Plugin URI` leads anywhere. A plugin shipped a
+  `Plugin URI` returning 404 and needed a same-day patch release to correct it,
+  because wordpress.org reads plugin headers from the stable tag rather than from
+  trunk — so the broken link could not be fixed without a new version.
+
+  Checks `Plugin URI`, `Author URI` and the readme's `Donate link`. Falls back to
+  `GET` when a server refuses `HEAD`, which some do.
+
+  **Offline is reported as "could not tell", never as a failure.** If no URL can
+  be reached at all the check records SKIPPED rather than failing a build for
+  having no network; a gate that fails on a train is a gate people stop running.
+  A URL that answers with 404 while others answer 200 is a finding, because that
+  is the URL being wrong rather than the network being absent.
+
+Both default to enabled, and both were verified against the defect they exist to
+catch: the pot check fails when a real string is removed from a real template,
+and the URL check fails on the exact `Plugin URI` that forced the patch release.
+Both return to passing when the fault is corrected.
+
 ## 1.3.3
 
 ### Fixed

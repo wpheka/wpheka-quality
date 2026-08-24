@@ -321,6 +321,39 @@ def parse_phpunit(raw_dir, repo):
     return out
 
 
+def parse_simple_findings(raw_dir, repo, filename, tool):
+    """Findings a check wrote directly, already in report shape.
+
+    The checks this serves produce findings rather than tool output that needs
+    interpreting, so there is nothing to translate -- only fields to default and
+    a tool name to attach.
+    """
+    data = read_json(raw_dir / filename)
+    out = []
+    if not isinstance(data, list):
+        return out
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        out.append({
+            "tool": tool,
+            "severity": item.get("severity") or "MEDIUM",
+            "file": relative_to(repo, item.get("file")),
+            "line": item.get("line"),
+            "message": item.get("message") or "",
+            "source": item.get("source") or tool,
+        })
+    return out
+
+
+def parse_i18n_pot(raw_dir, repo):
+    return parse_simple_findings(raw_dir, repo, "i18n-pot.json", "i18n_pot")
+
+
+def parse_url_headers(raw_dir, repo):
+    return parse_simple_findings(raw_dir, repo, "url-headers.json", "url_headers")
+
+
 PARSERS = (
     parse_phpcs,
     parse_phpstan,
@@ -329,6 +362,8 @@ PARSERS = (
     parse_composer_audit,
     parse_plugin_check,
     parse_phpunit,
+    parse_i18n_pot,
+    parse_url_headers,
 )
 
 

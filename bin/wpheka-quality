@@ -46,7 +46,7 @@ ONLY_CHECKS=""
 SKIP_CHECKS=""
 JOBS=""
 
-ALL_CHECKS="php_syntax git_diff_check phpcs phpstan phpunit composer_validate composer_audit semgrep gitleaks plugin_check npm_lint npm_test coderabbit"
+ALL_CHECKS="php_syntax git_diff_check phpcs phpstan phpunit composer_validate composer_audit semgrep gitleaks plugin_check i18n_pot url_headers npm_lint npm_test coderabbit"
 
 [[ -t 1 ]] || COLOR=0
 
@@ -1162,6 +1162,81 @@ PYPC
   fi
 else
   skip "plugin_check" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 10. Translation template drift
+#
+# A .pot goes stale silently. Three consecutive releases of one plugin shipped or
+# nearly shipped a template missing strings that were already in the code, each
+# time because regenerating it is a step a person has to remember. The code knows
+# the answer, so ask the code.
+#
+# Compared by msgid, not by file contents: a .pot carries `#:` source references
+# and a creation date that change whenever anything moves, and a check that
+# reports drift every run is a check people learn to ignore.
+# ---------------------------------------------------------------------------
+if check_enabled i18n_pot; then
+  POT_REL="$( cd "$REPO" && ls languages/*.pot 2>/dev/null | head -1 )"
+
+  if [[ -z "$POT_REL" ]]; then
+    skip "i18n_pot" "no languages/*.pot in this repository"
+  elif ! command -v wp >/dev/null 2>&1; then
+    skip "i18n_pot" "wp-cli not installed"
+  elif [[ -z "$( cd "$REPO" && grep -lE '^[[:space:]]*\*?[[:space:]]*Plugin Name[[:space:]]*:' ./*.php 2>/dev/null | head -1 )" ]]; then
+    skip "i18n_pot" "no plugin header at the repository root"
+  else
+    # The same exclude list the other checks use, so a bundled framework is not
+    # scanned for strings that belong to its own repository.
+    POT_EXCLUDE=""
+    if [[ -n "${WPHEKA_CFG_EXCLUDE:-}" ]]; then
+      POT_EXCLUDE_LIST="$(python3 <<'PYPOT'
+import os
+seen, out = set(), []
+for raw in os.environ.get("WPHEKA_CFG_EXCLUDE", "").splitlines():
+    entry = raw.strip().rstrip("/")
+    if not entry or "," in entry or entry in seen:
+        continue
+    seen.add(entry)
+    out.append(entry)
+print(",".join(out))
+PYPOT
+)"
+      [[ -n "$POT_EXCLUDE_LIST" ]] && POT_EXCLUDE="--exclude='$POT_EXCLUDE_LIST'"
+    fi
+
+    run_check "i18n_pot" \
+      "wp i18n make-pot . '$RAW/fresh.pot' $POT_EXCLUDE --quiet >/dev/null 2>&1 || exit 2; \
+       python3 '$ROOT/bin/compare-pot.py' '$POT_REL' '$RAW/fresh.pot' '$RAW/i18n-pot.json' '$POT_REL'" \
+      "0" "2" \
+      "could not read a .pot" "the template could not be generated or read"
+  fi
+else
+  skip "i18n_pot" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. URL headers resolve
+#
+# Plugin Check validates the donate link's syntax and that Domain Path names a
+# real folder; nothing checks that Plugin URI leads anywhere. One plugin shipped
+# a Plugin URI returning 404 and needed a same-day patch release, because
+# wordpress.org reads plugin headers from the stable tag and not from trunk.
+#
+# Offline is reported as "could not tell", never as a failure. A gate that fails
+# on a train is a gate people stop running.
+# ---------------------------------------------------------------------------
+if check_enabled url_headers; then
+  if [[ -z "$( cd "$REPO" && grep -lE '^[[:space:]]*\*?[[:space:]]*Plugin Name[[:space:]]*:' ./*.php 2>/dev/null | head -1 )" ]]; then
+    skip "url_headers" "no plugin header at the repository root"
+  else
+    run_check "url_headers" \
+      "python3 '$ROOT/bin/check-url-headers.py' . '$RAW/url-headers.json'" \
+      "0" "" \
+      "treating as offline|no URL headers declared" "no network, or no URL headers declared"
+  fi
+else
+  skip "url_headers" "disabled in configuration"
 fi
 
 # ---------------------------------------------------------------------------
