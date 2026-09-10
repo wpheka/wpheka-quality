@@ -179,6 +179,11 @@ if [[ ! "$PHPCS_MEM_LIMIT" =~ ^(-1|[0-9]+[KMGkmg]?)$ ]]; then
   die "invalid WPHEKA_PHPCS_MEMORY_LIMIT '$PHPCS_MEM_LIMIT' (expected e.g. 512M, 1G or -1)"
 fi
 
+PHPSTAN_MEM_LIMIT="${WPHEKA_PHPSTAN_MEMORY_LIMIT:-1G}"
+if [[ ! "$PHPSTAN_MEM_LIMIT" =~ ^(-1|[0-9]+[KMGkmg]?)$ ]]; then
+  die "invalid WPHEKA_PHPSTAN_MEMORY_LIMIT '$PHPSTAN_MEM_LIMIT' (expected e.g. 512M, 1G or -1)"
+fi
+
 # Every value the engine interpolates into a command string is shell input and
 # is validated here, not at the point of use. Wrapping an interpolation in
 # single quotes is not validation: a quote inside the value ends the quoted
@@ -949,9 +954,36 @@ if check_enabled phpstan; then
   elif [[ ! -f "$REPO/phpstan.neon" && ! -f "$REPO/phpstan.neon.dist" ]]; then
     skip "phpstan" "phpstan installed but no phpstan.neon/.dist configuration"
   else
+    # PHPStan loads the whole symbol table, and with WordPress + WooCommerce
+    # stubs that is far past PHP's 128M default: it crashed a worker before
+    # analysing anything, reported file_errors 0, and the run scored PASS. A
+    # check that could not run must not pass, so the limit is explicit.
+    #
+    # --memory-limit rather than `php -d`: the binary re-execs its own workers
+    # and only the CLI option reaches them. PHPSTAN_MEM_LIMIT was validated at
+    # startup because it is interpolated into this command string.
     run_check "phpstan" \
-      "$PHPSTAN_BIN --no-progress --no-interaction --error-format=json > '$RAW/phpstan.json' 2>'$RAW/phpstan.stderr.log'; rc=\$?; cat '$RAW/phpstan.stderr.log'; exit \$rc" \
+      "$PHPSTAN_BIN --no-progress --no-interaction --memory-limit=$PHPSTAN_MEM_LIMIT --error-format=json > '$RAW/phpstan.json' 2>'$RAW/phpstan.stderr.log'; rc=\$?; cat '$RAW/phpstan.stderr.log'; exit \$rc" \
       "0,1"
+  fi
+
+  # PHPStan reports a crash as a *generic* error with file_errors 0, and the
+  # accepted exit codes (0,1) cannot tell that apart from "ran and found one
+  # thing". That is how a worker dying on PHP's default memory limit scored PASS
+  # for nine days. Surface it the same way an incomplete coderabbit run is
+  # surfaced, so the report says the analysis did not actually happen.
+  if [[ -f "$RAW/phpstan.json" ]] && command -v python3 >/dev/null 2>&1; then
+    PHPSTAN_GENERIC="$(python3 -c "
+import json,sys
+try:
+    d=json.load(open('$RAW/phpstan.json'))
+except Exception:
+    sys.exit()
+print(int(d.get('totals',{}).get('errors') or 0))
+" 2>/dev/null)"
+    if [[ "$PHPSTAN_GENERIC" =~ ^[0-9]+$ ]] && (( PHPSTAN_GENERIC > 0 )); then
+      log_warn "phpstan reported $PHPSTAN_GENERIC error(s) not tied to a file; the analysis is incomplete and its findings cannot be trusted for this run"
+    fi
   fi
 else
   skip "phpstan" "disabled in configuration"

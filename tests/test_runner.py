@@ -482,6 +482,26 @@ class TestCli(unittest.TestCase):
                       env=dict(os.environ, WPHEKA_PHPCS_MEMORY_LIMIT=value))
             self.assertEqual(res.returncode, 0, "%s should be accepted: %s" % (value, res.stderr))
 
+    def test_regression_phpstan_memory_limit_cannot_inject_a_command(self):
+        # Added with the limit itself, so it can never be the unguarded twin of
+        # WPHEKA_PHPCS_MEMORY_LIMIT: it is interpolated into the same kind of
+        # command string, and is validated at startup for the same reason.
+        marker = pathlib.Path(tempfile.gettempdir()) / "wq-phpstan-memlimit-injection.txt"
+        if marker.exists():
+            marker.unlink()
+        res = run([RUNNER, "--repo", str(FIXTURE_DIR), "--only", "phpstan", "--no-color", "--quiet"],
+                  env=dict(os.environ,
+                           WPHEKA_PHPSTAN_MEMORY_LIMIT="1G; touch %s" % marker))
+        self.assertFalse(marker.exists(), "memory limit value reached the shell")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("invalid WPHEKA_PHPSTAN_MEMORY_LIMIT", res.stderr)
+
+    def test_phpstan_memory_limit_accepts_valid_php_literals(self):
+        for value in ("1G", "512M", "2048", "-1"):
+            res = run([RUNNER, "--repo", str(FIXTURE_DIR), "--list-checks"],
+                      env=dict(os.environ, WPHEKA_PHPSTAN_MEMORY_LIMIT=value))
+            self.assertEqual(res.returncode, 0, "%s should be accepted: %s" % (value, res.stderr))
+
     def test_regression_env_values_cannot_inject_commands(self):
         # Every value interpolated into a command string is shell input.
         # WPHEKA_PHPCS_STANDARD was unquoted; WPHEKA_SEMGREP_CONFIG was wrapped

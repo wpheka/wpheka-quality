@@ -188,6 +188,15 @@ phpcs runs with `memory_limit=1G` (`WPHEKA_PHPCS_MEMORY_LIMIT` to change it);
 PHP's default exhausts on a large tree and surfaces as a fatal error rather
 than as findings.
 
+phpstan runs with `--memory-limit=1G` (`WPHEKA_PHPSTAN_MEMORY_LIMIT` to change
+it), for the same reason and then some: it loads the whole symbol table, and a
+project with WordPress and WooCommerce stubs needs roughly 512M before it will
+complete at all. Below that a worker dies, PHPStan reports a *generic* error
+with `file_errors: 0`, and because findings are an accepted exit code the run
+would otherwise score PASS while having analysed nothing. A generic error is now
+called out in the run output — read `totals.errors` in `phpstan.json`, not the
+status column.
+
 ## CI
 
 `sarif.json` uploads to GitHub code scanning directly. See
