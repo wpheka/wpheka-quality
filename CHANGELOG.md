@@ -1,5 +1,93 @@
 # Changelog
 
+## 1.5.0
+
+Four defects with one shape: a check reported success while no evidence had been
+produced. Three were found in a single sitting while building a scheduler on top
+of this engine, which is the argument for scheduling it.
+
+### Added
+
+- **CodeRabbit findings now reach the report.** `PARSERS` had no
+  `parse_coderabbit`, and the check ran `cr review` with no output-format flag,
+  so findings landed in the raw log and nowhere else — not `findings.json`, not
+  `sarif.json`, not the severity counts, not `--fail-on-severity`, not the
+  baseline. A run could print ten checks passed and `Findings extracted: 0`
+  while CodeRabbit had reported a real defect in that same run.
+
+  The CLI advertises `--agent`, which emits newline-delimited JSON, and the
+  check now uses it. Three things about that format are worth recording,
+  because none of them are documented anywhere obvious. A finding carries
+  `severity`, `fileName` and `codegenInstructions` and **no line number field**
+  — the location is in prose, `"In @file.php at line 8"`. Every
+  `codegenInstructions` is prefixed with the same prompt-injection guard
+  paragraph, which is stripped before it can dominate the message and the
+  fingerprint hashed from it. And the closing `complete` event states its own
+  finding count.
+
+  That count is reconciled against what was parsed, and a disagreement is
+  itself reported as a finding. A parser that quietly read fewer would recreate
+  this exact bug one level down.
+
+  The pre-`--agent` terminal transcript is still parsed, ANSI and OSC-8
+  hyperlink escapes included, so report directories already on disk still
+  render. A fixture of each format is included; the plain one is a real
+  23-finding review.
+
+- **A bundled gitleaks ruleset, because the defaults are not enough here.**
+  With its stock rules gitleaks scanned a repository holding a live WooCommerce
+  consumer key and secret in a tracked file, across every commit, and reported
+  `no leaks found`. `generic-api-key` does not fire on a `ck_`/`cs_` pair, and
+  those are the most likely secret in a WooCommerce portfolio — every store
+  integration and every release pipeline authenticates with one.
+
+  `config/gitleaks-wpheka.toml` extends the defaults rather than replacing them
+  and adds the two rules. Precedence mirrors phpcs: a repository's own
+  `.gitleaks.toml` wins, then `WPHEKA_GITLEAKS_CONFIG`, then the bundled file.
+  The ruleset in use is printed for the same reason the phpcs one is — a
+  ruleset that silently drops rules is indistinguishable from a history with no
+  secrets in it.
+
+### Fixed
+
+- **phpstan ran with PHP's default memory limit.** Inheriting 128M, a project
+  carrying WordPress and WooCommerce stubs needs roughly 512M before the
+  analysis completes at all. Below that a worker dies, PHPStan writes a
+  *generic* error with `file_errors 0`, and because findings are an accepted
+  exit code the check scored `PASS` having analysed nothing. It held for nine
+  days on a real project before anyone noticed.
+
+  `WPHEKA_PHPSTAN_MEMORY_LIMIT` defaults to 1G and is validated at startup
+  exactly as `WPHEKA_PHPCS_MEMORY_LIMIT` is, and for the same reason: the value
+  is interpolated into a command string. It is passed as `--memory-limit`
+  rather than `php -d`, because the binary re-execs its own workers and only
+  the CLI option reaches them, which is where the crash was. A generic error is
+  now called out in the run output; it does not change the status, since the
+  status machinery treats findings and crashes alike, so the warning makes the
+  crash visible rather than scoring it. Reading `totals.errors` from
+  `phpstan.json` remains the reliable check.
+
+- **A repository's `exclude` replaced the default list instead of adding to
+  it.** `merge_config` assigns lists wholesale, so naming one directory of your
+  own silently dropped `vendor/`, `node_modules/`, `dist/`, `build/` and
+  `.git/` along with it. phpcs then tokenised a minified JavaScript bundle
+  under `node_modules` until PHP exhausted a 1 GB limit and reported `ERROR`
+  having reviewed nothing — on a plugin processing live card payments, which
+  consequently had no phpcs coverage at all. With the defaults restored that
+  check completes in one second and reports 122 findings.
+
+  `.wpheka-quality.yml.example` has always described these as "already excluded
+  by default", so this makes the loader agree with its own documentation rather
+  than changing a deliberate contract. Two repositories had already worked
+  around it by re-listing the defaults by hand, which is what a usability trap
+  looks like from the outside.
+
+- **`relative_to()` corrupted paths beginning with a dot.** It ended in
+  `lstrip("./")`, which takes a character set rather than a prefix, so
+  `.claude/notes.md` was reported as `claude/notes.md` — a path that does not
+  exist. It affected every parser; the CodeRabbit one surfaced it because it is
+  the only one handed already-relative paths.
+
 ## 1.4.0
 
 ### Added
