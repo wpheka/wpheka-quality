@@ -1,0 +1,44 @@
+# WPHEKA Quality reviewing itself.
+#
+# Not a WordPress plugin: bash and python3, no PHP. The PHP toolchain is turned
+# off rather than left to report SKIPPED on every run, which would pad the
+# unreviewed-areas list with twelve lines that never change.
+#
+# Its real test suite is `python3 tests/test_runner.py`, which the engine has no
+# check for -- a `commands:` block could run it, but repo commands are untrusted
+# unless --allow-repo-commands is passed, so the suite stays in CI and in the
+# pre-commit path rather than here.
+
+project_type: tooling
+
+wordpress:
+  required: false
+
+woocommerce:
+  required: false
+
+checks:
+  php_syntax: false
+  phpcs: false
+  phpstan: false
+  phpunit: false
+  composer_validate: false
+  composer_audit: false
+  plugin_check: false
+  i18n_pot: false
+  url_headers: false
+
+  git_diff_check: true
+  gitleaks: true
+  semgrep: true
+  coderabbit: true
+  npm: false
+
+exclude:
+  # Real credentials by design: these are the fixtures that prove gitleaks and
+  # the secret rules actually fire. Scanning them reports the test data as a
+  # finding in every run.
+  - tests/fixtures/
+  - .wpheka-quality-reports/
+
+fail_on: error
