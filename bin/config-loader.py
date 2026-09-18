@@ -348,8 +348,24 @@ def load_config(repo_path, config_file=None, profile_name=None, profiles_dir=Non
     if isinstance(excludes, str):
         excludes = [excludes]
     if not isinstance(excludes, list):
-        excludes = list(DEFAULT_EXCLUDES)
-    config["exclude"] = [str(x) for x in excludes if str(x).strip()]
+        excludes = []
+    # The defaults are a floor, not a starting value a repository replaces.
+    #
+    # merge_config assigns lists wholesale, so a repository that excluded one
+    # directory of its own silently dropped vendor/ and node_modules/ along with
+    # it. phpcs then tokenised a minified JavaScript bundle under node_modules
+    # until PHP exhausted a 1 GB limit, and the check reported ERROR having
+    # reviewed nothing -- on a live payment gateway. Two repositories here had
+    # already worked around it by re-listing the defaults by hand.
+    #
+    # .wpheka-quality.yml.example has always described these as "already
+    # excluded by default"; this makes the loader agree with that promise.
+    merged = list(DEFAULT_EXCLUDES)
+    for item in excludes:
+        text = str(item).strip()
+        if text and text not in merged:
+            merged.append(text)
+    config["exclude"] = merged
 
     timeouts = config.get("timeouts")
     if not isinstance(timeouts, dict):

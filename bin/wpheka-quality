@@ -1078,8 +1078,37 @@ if check_enabled gitleaks; then
     # instead of falling back, so --no-git has to be passed through.
     GITLEAKS_ARGS="--source ."
     [[ $IS_GIT -eq 1 ]] || GITLEAKS_ARGS="--source . --no-git"
+
+    # Ruleset precedence mirrors phpcs: the repository's own config wins, then an
+    # explicit operator instruction, then the bundled ruleset.
+    #
+    # The bundled one exists because the defaults are not sufficient here. On a
+    # repository holding a live WooCommerce consumer key and secret in a tracked
+    # script, gitleaks 8.30.1 scanned 8 commits and reported "no leaks found":
+    # no default rule matches a ck_/cs_ pair. Reporting a clean history that is
+    # not clean is the worst failure this check can have.
+    GITLEAKS_CONFIG_ARG=""
+    GITLEAKS_RULESET="gitleaks defaults"
+    if [[ -f "$REPO/.gitleaks.toml" ]]; then
+      GITLEAKS_RULESET="repository ruleset"
+      if [[ -n "${WPHEKA_GITLEAKS_CONFIG:-}" ]]; then
+        log_warn "gitleaks: WPHEKA_GITLEAKS_CONFIG ignored; the repository's own ruleset takes precedence"
+      fi
+    elif [[ -n "${WPHEKA_GITLEAKS_CONFIG:-}" ]]; then
+      if [[ -f "${WPHEKA_GITLEAKS_CONFIG}" ]]; then
+        GITLEAKS_CONFIG_ARG="--config '${WPHEKA_GITLEAKS_CONFIG}'"
+        GITLEAKS_RULESET="$WPHEKA_GITLEAKS_CONFIG"
+      else
+        log_warn "gitleaks: WPHEKA_GITLEAKS_CONFIG not found: ${WPHEKA_GITLEAKS_CONFIG}"
+      fi
+    elif [[ -f "$ROOT/config/gitleaks-wpheka.toml" ]]; then
+      GITLEAKS_CONFIG_ARG="--config '$ROOT/config/gitleaks-wpheka.toml'"
+      GITLEAKS_RULESET="WPHEKA (defaults plus WooCommerce API keys)"
+    fi
+    log_info "gitleaks ruleset: $GITLEAKS_RULESET"
+
     run_check "gitleaks" \
-      "gitleaks detect $GITLEAKS_ARGS --no-banner --redact --exit-code 1 --report-format json --report-path '$RAW/gitleaks.json'" \
+      "gitleaks detect $GITLEAKS_ARGS $GITLEAKS_CONFIG_ARG --no-banner --redact --exit-code 1 --report-format json --report-path '$RAW/gitleaks.json'" \
       "0"
   else
     skip "gitleaks" "gitleaks not installed"
@@ -1325,9 +1354,15 @@ if check_enabled coderabbit; then
     # Invocations use the `review` subcommand with boolean scope flags, which is
     # what the CodeRabbit CLI actually accepts. An earlier form passed
     # `--plain --type <scope>`; neither option exists, so every run died with a
-    # usage error in about two seconds and the check could never pass. Nothing
-    # parses this output structurally -- the log is raw evidence, read only for
-    # a rate-limit notice below -- so no output-format flag is needed.
+    # usage error in about two seconds and the check could never pass.
+    #
+    # `--agent` emits newline-delimited JSON instead of the terminal transcript,
+    # and render-report.py parses it into findings. Without it CodeRabbit's
+    # findings reached the raw log and nothing else -- not findings.json, not the
+    # severity counts, not --fail-on-severity -- so a run could report ten checks
+    # passed while CodeRabbit had just reported a defect. The closing `complete`
+    # event also states its own finding count, which the parser reconciles
+    # against what it read rather than trusting either number alone.
     CR_UNAVAILABLE="rate limit|too many requests|quota exceeded|review limit reached|all free CLI reviews"
     CR_MODE="${WPHEKA_CODERABBIT_MODE:-uncommitted}"
     case "$CR_MODE" in
@@ -1340,7 +1375,7 @@ if check_enabled coderabbit; then
         if [[ $IS_GIT -eq 1 ]] && git -C "$REPO" diff --quiet HEAD 2>/dev/null; then
           skip "coderabbit" "no staged or tracked changes to review"
         else
-          run_check "coderabbit" "$CR_BIN review --uncommitted" "0" "" "$CR_UNAVAILABLE" "review limit reached; nothing was reviewed (the free tier allows 3 per hour)"
+          run_check "coderabbit" "$CR_BIN review --agent --uncommitted" "0" "" "$CR_UNAVAILABLE" "review limit reached; nothing was reviewed (the free tier allows 3 per hour)"
         fi
         ;;
       base)
@@ -1360,7 +1395,7 @@ if check_enabled coderabbit; then
         elif ! git -C "$REPO" rev-parse --verify "$CR_BASE" >/dev/null 2>&1; then
           skip "coderabbit" "base ref not found: $CR_BASE"
         else
-          run_check "coderabbit" "$CR_BIN review --base '$CR_BASE'" "0" "" "$CR_UNAVAILABLE" "review limit reached; nothing was reviewed (the free tier allows 3 per hour)"
+          run_check "coderabbit" "$CR_BIN review --agent --base '$CR_BASE'" "0" "" "$CR_UNAVAILABLE" "review limit reached; nothing was reviewed (the free tier allows 3 per hour)"
         fi
         ;;
       *)

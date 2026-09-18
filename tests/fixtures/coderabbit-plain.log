@@ -1,0 +1,740 @@
+Notice: Detected claude environment. Use `coderabbit review --agent` for structured agent-friendly output.
+Connecting to CodeRabbit... 2s elapsed
+
+   !   wpheka/wc-moneris-payment-gateway-pro is not connected to a CodeRabbit
+       organization you can access, so this review will use the free CLI
+       allowance.
+
+       If you expected an org plan here, check your signed-in account with
+       coderabbit auth status, or install CodeRabbit for
+       wpheka/wc-moneris-payment-gateway-pro at https://app.coderabbit.ai
+
+────────────────────────────────────────
+CodeRabbit Review
+
+Diff      : tracked changes
+Compare   : 5.0 → 31cfcc6
+Directory : wc-moneris-payment-gateway-pro
+────────────────────────────────────────
+
+(\(\
+(• .•)  If debugging is the process of removing bugs, then programming must be the process of putting them in. - Edsger W. Dijkstra
+
+Preparing review... 8s elapsed
+Summarizing changes... 17s elapsed
+Writing review comments... 38s elapsed
+Writing review comments... 1m 08s elapsed - still working
+Writing review comments... 2m 08s elapsed - still working
+Writing review comments... 3m 08s elapsed - still working
+
+────────────────────────────────────────────────────────────────────────
+  minor [Functional Correctness]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/.claude/bugs-fixed.md:106.claude/bugs-fixed.md:106-109]8;;
+
+  Correct the double-encoding statement.
+
+  rawurlencode() encodes %, so it is not idempotent. A pre-encoded
+  callback URL can be double-encoded. Remove the claim that double-encoding
+  cannot happen and define whether the helper accepts only raw URLs or
+  normalizes encoded input first.
+
+Writing review comments... 4m 17s elapsed - still working - 1 finding so far
+
+────────────────────────────────────────────────────────────────────────
+  major [Security & Privacy]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/class-wpheka-gateway-moneris-pro-3ds.php:465includes/class-wpheka-gateway-moneris-pro-3ds.php:465-468]8;;
+
+  Redact the raw MPI response bodies before logging them.
+
+  redact_log_context() in the gateway masks keys named cavv, pan,
+  api_token and similar. Here the whole response body is passed as a
+  single string under response_data, so no masking applies. The
+  authentication and CAVV-lookup responses carry the Cavv element, so
+  these two log lines write the cryptogram in clear text — which contradicts
+  the masking added in cavv_purchase() and cavv_preauth(), and the
+  project rule that CAVV is never persisted.
+
+  Reuse a redaction pass on the response string, as redact_request_xml()
+  already does for requests.
+
+
+  🔒️ Proposed redaction of response bodies
+
+  +    /**
+  +     * Redact card data and the authentication value from a raw MPI response body.
+  +     *
+  +     * @param string $data
+  +     * @return string
+  +     */
+  +    private function redact_response_data($data)
+  +    {
+  +        return $this->redact_request_xml($data);
+  +    }
+  +
+
+               $this->log('Authentication RAW RESPONSE DATA', 'debug', [
+                   'order_id' => $data['order_id'],
+  -                'response_data' => $response->getMpgResponseData(),
+  +                'response_data' => $this->redact_response_data($response->getMpgResponseData()),
+               ]);
+
+               $this->log('CAVV Lookup RAW RESPONSE DATA', 'debug', [
+  -                'response_data' => $response->getMpgResponseData(),
+  +                'response_data' => $this->redact_response_data($response->getMpgResponseData()),
+               ]);
+
+  Note that redact_request_xml() currently masks `` only; confirm the
+  response element name matches, or extend the pattern.
+
+  As per coding guidelines: "All logging uses WooCommerce logger with
+  sensitive data masking (card numbers, CVD, API tokens)" and "CAVV is
+  deliberately never persisted."
+
+
+
+
+
+  Also applies to: 614-616
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Stability & Availability]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/class-wpheka-gateway-moneris-pro-3ds-endpoints.php:181includes/class-wpheka-gateway-moneris-pro-3ds-endpoints.php:181-187]8;;
+
+  Resolve the gateway without cart-dependent availability.
+
+  get_available_payment_gateways() filters gateways by the current cart
+  and session. This callback arrives from the issuer's ACS, where the
+  session is frequently absent and the cart is often gone — the file header
+  states this. When the gateway is filtered out, the handler throws `Gateway
+  not found` and the customer sees an authentication error after a
+  successful bank check.
+
+  Use the registered gateway list instead, which is what the REST endpoint
+  controller already does for this exact reason.
+
+
+  🐛 Proposed fix
+
+  -            // Get gateway instance
+  -            $gateways = WC()->payment_gateways->get_available_payment_gateways();
+  -            $gateway = isset($gateways['moneris']) ? $gateways['moneris'] : null;
+  +            // Registered, not "available": availability depends on the cart, and by the time the
+  +            // ACS calls back the cart is often gone.
+  +            $gateways = WC()->payment_gateways()->payment_gateways();
+  +            $gateway  = isset($gateways['moneris']) ? $gateways['moneris'] : null;
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Security & Privacy]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/admin/license/api-manager-php-library/wc-am-client.php:395includes/admin/license/api-manager-php-library/wc-am-client.php:395-408]8;;
+
+  Do not disable SSL verification based on a hostname heuristic.
+
+  is_staging() matches public, production-capable hosts. .dev is a real
+  public TLD, and .cloudwaysapps.com, .kinsta.cloud, .wpengine.com and
+  .sg-host.com are used for live stores. On any such site
+  get_http_request_args() sets sslverify => false and
+  reject_unsafe_urls => false for every license request, so the license
+  key and activation response travel over an unverified TLS channel and
+  become MITM-modifiable.
+
+  Gate the relaxed transport on an explicit local-only signal instead, for
+  example WP_ENVIRONMENT_TYPE of local/development, or
+  wp_get_environment_type(), plus a filter the merchant must opt into.
+
+
+  🔒️ Proposed restriction of the relaxed transport
+
+   		private function get_http_request_args( $custom_args = array() ) {
+   
+   			$defaults = array(
+   				'timeout' => 15,
+   			);
+   
+  -			// Disable SSL verification and safe URLs for local/staging environments only.
+  -			if ( $this->is_staging() ) {
+  +			// Only relax transport security on an explicitly declared local/development site.
+  +			$environment = function_exists( 'wp_get_environment_type' ) ? wp_get_environment_type() : 'production';
+  +
+  +			if ( in_array( $environment, array( 'local', 'development' ), true ) ) {
+   				$defaults['reject_unsafe_urls'] = false;
+   				$defaults['sslverify']          = false;
+   			}
+   
+   			return wp_parse_args( $custom_args, $defaults );
+   		}
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Functional Correctness]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/class-wpheka-gateway-moneris-pro.php:3880includes/class-wpheka-gateway-moneris-pro.php:3880-3890]8;;
+
+  Unslash the browser fields posted for 3-D Secure.
+
+  WordPress adds slashes to $_POST. These values are sent verbatim to
+  Moneris and compared by the ACS against what the browser reported, so a
+  user agent or accept header that contains a quote arrives with an inserted
+  backslash and no longer matches.
+  WPHEKA_Gateway_Moneris_Pro_3DS::authenticate() already calls
+  wp_unslash() on the $_SERVER fallback for exactly this reason; the
+  posted values need the same treatment.
+
+
+  🐛 Proposed fix
+
+           $browser_data = array(
+  -            'user_agent'         => isset($_POST['browser_user_agent']) ? sanitize_text_field($_POST['browser_user_agent']) : ($_SERVER['HTTP_USER_AGENT'] ?? ''),
+  +            'user_agent'         => isset($_POST['browser_user_agent']) ? wp_unslash($_POST['browser_user_agent']) : wp_unslash($_SERVER['HTTP_USER_AGENT'] ?? ''),
+               'java_enabled'       => filter_var($_POST['browser_java_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN) ? 'true' : 'false',
+  -            'javascript_enabled' => isset($_POST['browser_javascript_enabled']) ? sanitize_text_field($_POST['browser_javascript_enabled']) : '',
+  -            'screen_height'      => isset($_POST['browser_screen_height']) ? sanitize_text_field($_POST['browser_screen_height']) : '',
+  -            'screen_width'       => isset($_POST['browser_screen_width']) ? sanitize_text_field($_POST['browser_screen_width']) : '',
+  -            'language'           => isset($_POST['browser_language']) ? sanitize_text_field($_POST['browser_language']) : '',
+  -            'color_depth'        => isset($_POST['browser_color_depth']) ? sanitize_text_field($_POST['browser_color_depth']) : '',
+  -            'timezone'           => isset($_POST['browser_timezone']) ? sanitize_text_field($_POST['browser_timezone']) : '',
+  -            'accept_header'      => isset($_POST['browser_accept_header']) ? sanitize_text_field($_POST['browser_accept_header']) : ($_SERVER['HTTP_ACCEPT'] ?? ''),
+  +            'javascript_enabled' => isset($_POST['browser_javascript_enabled']) ? sanitize_text_field(wp_unslash($_POST['browser_javascript_enabled'])) : '',
+  +            'screen_height'      => isset($_POST['browser_screen_height']) ? sanitize_text_field(wp_unslash($_POST['browser_screen_height'])) : '',
+  +            'screen_width'       => isset($_POST['browser_screen_width']) ? sanitize_text_field(wp_unslash($_POST['browser_screen_width'])) : '',
+  +            'language'           => isset($_POST['browser_language']) ? sanitize_text_field(wp_unslash($_POST['browser_language'])) : '',
+  +            'color_depth'        => isset($_POST['browser_color_depth']) ? sanitize_text_field(wp_unslash($_POST['browser_color_depth'])) : '',
+  +            'timezone'           => isset($_POST['browser_timezone']) ? sanitize_text_field(wp_unslash($_POST['browser_timezone'])) : '',
+  +            'accept_header'      => isset($_POST['browser_accept_header']) ? wp_unslash($_POST['browser_accept_header']) : wp_unslash($_SERVER['HTTP_ACCEPT'] ?? ''),
+           );
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Stability & Availability]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/wc-moneris-payment-gateway-pro.php:536wc-moneris-payment-gateway-pro.php:536]8;;
+
+  Guard WC()->session before every dereference in this handler.
+
+  Line 483 and line 498 treat WC()->session as possibly null. Line 536
+  then calls WC()->session->get('threeds_cavv') without a guard. If the
+  session object is absent on this request, PHP 8 raises a fatal error `Call
+  to a member function get() on null` and the customer sees a white screen
+  mid-authentication. The same unguarded pattern appears at lines 545-549,
+  569, 618-620, and 638-639.
+
+  Resolve the session once and branch on it.
+
+
+
+
+
+
+  🛡️ Proposed fix
+
+  -                // Check if challenge was already completed (CAVV data available)
+  -                $cavv = WC()->session->get('threeds_cavv');
+  +                // Check if challenge was already completed (CAVV data available)
+  +                $session = WC()->session;
+  +                $cavv = $session ? $session->get('threeds_cavv') : '';
+
+  Then replace the remaining WC()->session-> calls in this method with
+  $session and skip the session writes when $session is null.
+
+
+
+  Also applies to: 545-549, 569-569, 618-620, 638-639
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Security & Privacy]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/wc-moneris-payment-gateway-pro.php:543wc-moneris-payment-gateway-pro.php:543-551]8;;
+
+  Do not store CAVV in WC()->session.
+
+  WC()->session->set() persists session data in WooCommerce’s
+  wp_woocommerce_sessions table. Keep CAVV in a request-scoped variable
+  and read it from the transient only during payment completion.
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Stability & Availability]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/tests/spec-conformance-check.php:278tests/spec-conformance-check.php:278-281]8;;
+
+  Guard the request-body content lookup.
+
+  wpheka_spec_deref() returns an empty array when it cannot resolve a
+  $ref. reset($body['content']) then receives an undefined index. On PHP
+  8 that raises a TypeError and the whole conformance run aborts, so no
+  finding is printed at all. $content['schema'] has the same exposure.
+
+
+  🛡️ Proposed guard
+
+       $body    = wpheka_spec_deref($spec['paths'][$path]['post']['requestBody'], $spec);
+  -    $content = reset($body['content']);
+  +
+  +    if (empty($body['content']) || !is_array($body['content'])) {
+  +        $findings[] = array('NO SPEC ENTRY', $path, '', 'requestBody has no resolvable content');
+  +        continue;
+  +    }
+  +
+  +    $content = reset($body['content']);
+  +
+  +    if (!is_array($content) || !isset($content['schema'])) {
+  +        $findings[] = array('NO SPEC ENTRY', $path, '', 'content has no schema');
+  +        continue;
+  +    }
+   
+       wpheka_spec_check($path, $payload, $content['schema'], $spec, $findings);
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Functional Correctness]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/tests/moneris-test-cards.php:152tests/moneris-test-cards.php:152-156]8;;
+
+  Fix the Amex PAN length in the unavailable scenario.
+
+  3400000000002922 has 16 digits. Amex PANs have 15 digits, and every
+  other Amex entry in this table has 15. A test that uses this value fails
+  card validation instead of producing trans_status U. This file states it
+  is the only durable record of these numbers, so confirm the digit against
+  the source before correcting it.
+
+
+
+
+
+  🐛 Probable correction
+
+           'unavailable'              => array(
+               'visa'       => '4000000000002313',
+               'mastercard' => '5200000000002268',
+  -            'amex'       => '3400000000002922',
+  +            'amex'       => '340000000002922',
+           ),
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Functional Correctness]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/tests/rest-probe-3ds-403.php:80tests/rest-probe-3ds-403.php:80-82]8;;
+
+  Stop when the stored method has no id.
+
+  wpheka_gateway_moneris_pro_rest_read_payment_method($stored)['id'] can
+  return an empty string when the response shape differs. The probe then
+  sends paymentMethodId: "" in variants A, B, D and E-H. Moneris answers
+  with a field error, and that answer reads like the entitlement result this
+  probe exists to isolate.
+
+
+  🛡️ Proposed guard
+
+   $method_id = wpheka_gateway_moneris_pro_rest_read_payment_method($stored)['id'];
+   
+  +if ('' === (string) $method_id) {
+  +    WP_CLI::error('Stored the card but read no payment method id; the variants below would probe nothing.');
+  +}
+  +
+   WP_CLI::log('stored payment method: ' . $method_id);
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Security & Privacy]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/templates/checkout/moneris-3ds-challenge.php:613templates/checkout/moneris-3ds-challenge.php:613-627]8;;
+
+  Validate event.origin before acting on the message.
+
+  This listener acts on any message event that carries the expected
+  type. Any window that opens this page, or any page that frames it, can
+  post {type:'3DS_CHALLENGE_COMPLETE', transStatus:'Y'} and drive the
+  completion request, or post 3DS_CHALLENGE_ERROR to force the redirect to
+  failUrl. The sibling template
+  templates/checkout/moneris-rest-3ds-frame.php already rejects messages
+  from other origins. Apply the same check here.
+
+
+
+
+
+  🔒 Proposed fix
+
+           // Listen for challenge completion message from the ACS iframe
+           window.addEventListener('message', function(event) {
+  +            // The notification page that posts these messages is served from this site.
+  +            // Messages from any other origin are not ours.
+  +            if (event.origin !== window.location.origin) {
+  +                return;
+  +            }
+               if (event.data && event.data.type === '3DS_CHALLENGE_COMPLETE') {
+
+Writing review comments... 8m 08s elapsed - still working - 11 findings so far
+
+────────────────────────────────────────────────────────────────────────
+  major [Data Integrity & Integration]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/wpheka-moneris-api/src/Gateway.php:187includes/wpheka-moneris-api/src/Gateway.php:187-189]8;;
+
+  Do not change the process timezone.
+
+  date_default_timezone_set('Canada/Eastern') mutates the timezone for the
+  rest of the PHP request. The code never restores it. Every later date()
+  call in the same request is affected, including WooCommerce order date
+  formatting and any other plugin loaded after the payment. The comment says
+  "configurable timezone or fallback to WordPress setting", but the value is
+  hardcoded.
+
+  Format the timestamps with an explicit DateTimeZone instead.
+
+
+
+
+
+
+  ♻️ Proposed approach for the transaction reference
+
+  -        // Use configurable timezone or fallback to WordPress setting
+  -        $timezone = 'Canada/Eastern';
+  -        date_default_timezone_set($timezone);
+  +        $moneris_tz = new \DateTimeZone('Canada/Eastern');
+
+  -        $timestamp = date('Ymd-His'); // e.g., 20250611-103455
+  +        $timestamp = (new \DateTime('now', $moneris_tz))->format('Ymd-His');
+
+  Also applies to: 831-833
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Maintainability & Code Quality]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/languages/wpheka-gateway-moneris-pro.pot:5languages/wpheka-gateway-moneris-pro.pot:5]8;;
+
+  Reconcile the version numbers before release.
+
+  The catalog reports 4.9.19, which wp i18n make-pot reads from the
+  plugin file header. Other files in this change declare a different
+  release: package.json sets 5.0.0-dev, the checksum comment in
+  includes/wpheka-gateway-moneris-pro-hpos.php says "version 5.0.0", and
+  the new REST helpers use @since 5.0. Update the plugin header and
+  regenerate the POT so the shipped version is consistent.
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Security & Privacy]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/wpheka-moneris-api/src/Gateway.php:980includes/wpheka-moneris-api/src/Gateway.php:980-996]8;;
+
+  Stop logging the AVS payload in full.
+
+  Line 985 encodes the whole mpgAvsInfo object into the log. That object
+  carries the billing street, postal code, email address, phone number and
+  customer IP, which is exactly the data the new comment at Lines 968-970
+  removed from the customer-data log line. The log file is retained and
+  copied into support tickets.
+
+  Log field presence only, in the same way as the CVD line below it.
+
+  Separately, empty($cvd_info) at Line 995 evaluates an object and is
+  always false, so the ternary always reports "sent". Replace it with a
+  check on the submitted CVD value.
+
+  As per coding guidelines: "All logging uses WooCommerce logger with
+  sensitive data masking (card numbers, CVD, API tokens)".
+
+
+
+
+
+
+  🔒️ Proposed fix
+
+  -                \WPHEKA_Moneris_Pro_Logger::log(sprintf('Moneris API Request AVS Data: %s', json_encode($avs_info, JSON_PRETTY_PRINT)));
+  +                \WPHEKA_Moneris_Pro_Logger::log('Moneris API Request AVS Data: attached (values not logged)');
+
+
+────────────────────────────────────────────────────────────────────────
+  critical [Stability & Availability]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/wpheka-moneris-api/src/Gateway.php:153includes/wpheka-moneris-api/src/Gateway.php:153-174]8;;
+
+  Guard $this->order before writing order meta.
+
+  get_card_expiry() calls $this->order->get_id() unconditionally at
+  Lines 170-171. The constructor sets `$this->order = $params['order'] ??
+  null, so the property can be null. add_payment_method()` calls
+  get_card_expiry() on the account-page path and takes its customer id
+  from get_current_user_id() rather than from an order, which indicates no
+  order exists there. A null $this->order produces a fatal error on "Add
+  payment method".
+
+  The same file already guards this property in setTokenAvsInfo() (Line
+  685) and transaction() (Line 974). Apply the same guard here.
+
+
+
+
+
+
+  🐛 Proposed fix
+
+  -        $cardyear  = substr($formatted_expiry, 0, 2);
+  -        $cardmonth = substr($formatted_expiry, 2, 2);
+  -
+  -        wpheka_gateway_moneris_pro_update_order_meta_data('_card_month', $cardmonth, $this->order, $this->order->get_id());
+  -        wpheka_gateway_moneris_pro_update_order_meta_data('_card_year', $cardyear, $this->order, $this->order->get_id());
+  +        $cardyear  = substr($formatted_expiry, 0, 2);
+  +        $cardmonth = substr($formatted_expiry, 2, 2);
+  +
+  +        if ($this->order instanceof \WC_Order) {
+  +            wpheka_gateway_moneris_pro_update_order_meta_data('_card_month', $cardmonth, $this->order, $this->order->get_id());
+  +            wpheka_gateway_moneris_pro_update_order_meta_data('_card_year', $cardyear, $this->order, $this->order->get_id());
+  +        }
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Functional Correctness]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/wpheka-gateway-moneris-pro-rest-helpers.php:694includes/wpheka-gateway-moneris-pro-rest-helpers.php:694-705]8;;
+
+  Read the country from the billing array.
+
+  wpheka_gateway_moneris_pro_rest_e164_phone() returns '' for any number
+  without a leading + unless the country is CA or US. This call passes
+  $data['country'], but the documented input keys at Lines 664-665 are
+  card, cardholder_name, email, phone and billing. There is no
+  top-level country key, so the country argument is empty on the normal
+  path. Every North American phone number typed as "(514) 933-6358" is then
+  dropped, which is the exact case the normalizer was written to support.
+
+  Read the country from $data['billing']['country'], with the top-level
+  key kept as a fallback.
+
+
+
+
+
+
+  🐛 Proposed fix
+
+  +            $phone_country = '';
+  +            if (isset($data['billing']['country'])) {
+  +                $phone_country = (string) $data['billing']['country'];
+  +            } elseif (isset($data['country'])) {
+  +                $phone_country = (string) $data['country'];
+  +            }
+  +
+               $phone = wpheka_gateway_moneris_pro_rest_e164_phone(
+                   $data['phone'],
+  -                isset($data['country']) ? $data['country'] : ''
+  +                $phone_country
+               );
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Functional Correctness]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/wpheka-moneris-api/src/Gateway.php:634includes/wpheka-moneris-api/src/Gateway.php:634-675]8;;
+
+  Bail out when the expiry cannot be normalized.
+
+  wpheka_gateway_moneris_pro_normalize_expiry() returns '' for an
+  unparseable value. substr('', 2, 2) then returns '', so the token is
+  saved with expiry_month empty and expiry_year "20". Return early
+  instead, so the caller reports a token failure rather than storing an
+  unusable card.
+
+
+
+
+
+
+  🐛 Proposed fix
+
+  +            if ('' === $expiration_date) {
+  +                \WPHEKA_Moneris_Pro_Logger::log('Token creation aborted: card expiry could not be normalized.');
+  +                return false;
+  +            }
+  +
+               $expiration_month = substr($expiration_date, 2, 2);
+               $expiration_year  = substr($expiration_date, 0, 2);
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Security & Privacy]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/wpheka-moneris-api/src/Gateway.php:406includes/wpheka-moneris-api/src/Gateway.php:406-423]8;;
+
+  Sanitize the request headers before they reach the AVS payload.
+
+  $_SERVER['HTTP_HOST'] and $_SERVER['HTTP_USER_AGENT'] are
+  attacker-controlled and are used raw. mpgAvsInfo serialises its values
+  by string concatenation into the XML request, with no escaping. A
+  User-Agent or Host header that contains ` or &` corrupts the XML
+  sent to Moneris. A 50-character User-Agent is long enough to close the
+  avs_browser element and open another one.
+
+  Sanitize both values and strip XML metacharacters.
+
+
+
+
+
+
+  🔒️ Proposed fix
+
+  -        $avs_hostname = $_SERVER['HTTP_HOST'] ?? wp_parse_url(home_url(), PHP_URL_HOST);
+  -        $avs_browser = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
+  +        $avs_hostname = isset($_SERVER['HTTP_HOST'])
+  +            ? preg_replace('/[^A-Za-z0-9.\-:]/', '', wp_unslash($_SERVER['HTTP_HOST']))
+  +            : wp_parse_url(home_url(), PHP_URL_HOST);
+  +        $avs_browser = isset($_SERVER['HTTP_USER_AGENT'])
+  +            ? preg_replace('/[^\x20-\x7E]|[<>&"\']/', '', wp_unslash($_SERVER['HTTP_USER_AGENT']))
+  +            : 'Unknown';
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Functional Correctness]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/wpheka-gateway-moneris-pro-rest-helpers.php:144includes/wpheka-gateway-moneris-pro-rest-helpers.php:144-182]8;;
+
+  Handle a single-token street line.
+
+  explode(' ', $line, 2) produces one element for a line with no space.
+  The count($parts) === 2 guard then skips the street-number extraction,
+  so an address_1 of "123" returns streetNumber empty and streetName
+  "123". Moneris receives a house number as the street name. Accept a
+  digit-only single token as the street number.
+
+
+
+
+
+
+  ♻️ Proposed adjustment
+
+           $parts = explode(' ', $line, 2);
+   
+           if (count($parts) === 2 && preg_match('/[0-9]/', $parts[0])) {
+               $result['streetNumber'] = $parts[0];
+               $result['streetName']   = trim($parts[1]);
+  +        } elseif (1 === count($parts) && preg_match('/^[0-9]+[A-Za-z]?$/', $parts[0])) {
+  +            $result['streetNumber'] = $parts[0];
+  +            $result['streetName']   = '';
+           }
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Functional Correctness]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/tests/rest-probe-3ds-field-names.php:124tests/rest-probe-3ds-field-names.php:124-133]8;;
+
+  Add cardSecurityCode to the raw-card /payments payload. The Moneris
+  schema requires it under paymentMethod.card; without it, validation can
+  fail before the threeDSecureData field-name variants run.
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Maintainability & Code Quality]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/phpcs.xml:22phpcs.xml:22]8;;
+
+  Configure the WordPress sniff properties.
+
+  rule ref="WordPress" enables
+  WordPress.NamingConventions.PrefixAllGlobals and WordPress.WP.I18n.
+  Both need properties before they produce useful output. Without a
+  prefixes value, the prefix sniff reports every global function and class
+  in this plugin as an error. Without a text_domain value, the i18n sniff
+  cannot detect a wrong domain, which is the exact defect fixed in
+  GatewayResponseMessageHelper.php in this same change.
+
+  The repository guideline requires a PHPCS run after every PHP edit, so the
+  ruleset must be usable as configured.
+
+  As per coding guidelines: "After modifying any PHP file, immediately run
+  PHPCS on that file and fix the reported issues".
+
+
+
+
+
+
+  ♻️ Proposed configuration
+
+  -	<rule ref="WordPress"/>
+  +	<rule ref="WordPress"/>
+  +
+  +	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+  +		<properties>
+  +			<property name="prefixes" type="array">
+  +				<element value="wpheka"/>
+  +				<element value="WPHEKA"/>
+  +				<element value="woocommerce_gateway_moneris_pro"/>
+  +				<element value="Woocommerce_Gateway_Moneris_Pro"/>
+  +			</property>
+  +		</properties>
+  +	</rule>
+  +
+  +	<rule ref="WordPress.WP.I18n">
+  +		<properties>
+  +			<property name="text_domain" type="array">
+  +				<element value="wpheka-gateway-moneris-pro"/>
+  +			</property>
+  +		</properties>
+  +	</rule>
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Stability & Availability]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/wpheka-gateway-moneris-pro-hpos.php:418includes/wpheka-gateway-moneris-pro-hpos.php:418-439]8;;
+
+  Guard the checksum target before reading it.
+
+  file_get_contents($file) emits a PHP warning when $file does not exist
+  or is unreadable. The warning reaches the site error log and, on
+  misconfigured hosts, the page output. Add an is_readable() check before
+  the read.
+
+
+
+
+
+
+  🛡️ Proposed guard
+
+  -    $content = file_get_contents($file);
+  -    if ($content === false) {
+  +    if (!is_string($file) || '' === $file || !is_readable($file)) {
+  +        return false;
+  +    }
+  +
+  +    $content = file_get_contents($file);
+  +    if ($content === false) {
+           return false;
+       }
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Data Integrity & Integration]
+  → ]8;;vscode://file//Applications/MAMP/htdocs/wpheka-plugins/wp-content/plugins/wc-moneris-payment-gateway-pro/includes/wpheka-gateway-moneris-pro-hpos.php:249includes/wpheka-gateway-moneris-pro-hpos.php:249-252]8;;
+
+  Route AVS code W through the postal-match policy.
+
+  Moneris defines W as a postal-code match without a street-address match.
+  Mapping W to unconditional accept and a full match bypasses the
+  merchant’s configured zip_match policy. Treat W like Z and keep the
+  docblock consistent.
+
+Writing review comments... 9m 53s elapsed - still working - 23 findings so far
+Writing review comments... 10m 53s elapsed - still working - 23 findings so far
+Writing review comments... 11m 53s elapsed - still working - 23 findings so far
+Writing review comments... 12m 53s elapsed - still working - 23 findings so far
+Writing review comments... 13m 53s elapsed - still working - 23 findings so far
+
+────────────────────────────────────────
+Review complete
+23 findings ✔
+
+Critical 1
+Major    12
+Minor    10
+
+79 files reviewed:
+  - .claude/architecture.md
+  - .claude/bugs-fixed.md
+  - .claude/decisions.md
+  - .claude/memory.md
+  - .claude/settings.json
+  - .claude/todo.md
+  - .gitignore
+  - .wpheka-quality.yml
+  - CLAUDE.md
+  - assets/admin/js/admin.js
+  ... and 69 more files
+────────────────────────────────────────
+
+Print all AI prompts: coderabbit review --show-prompts

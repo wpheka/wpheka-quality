@@ -1,0 +1,31 @@
+# WPHEKA gitleaks ruleset.
+#
+# Extends the bundled defaults rather than replacing them, so every rule gitleaks
+# ships with still applies.
+#
+# Why this file exists: gitleaks 8.30.1 with its default ruleset scanned a
+# repository holding a live WooCommerce consumer key and secret, in a tracked
+# shell script, across 8 commits, and reported "no leaks found". The default
+# generic-api-key rule does not match a `ck_`/`cs_` pair, and WooCommerce
+# credentials are the most likely secret in this portfolio -- every store
+# integration and the release pipeline authenticates with one.
+
+title = "WPHEKA"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "wpheka-woocommerce-consumer-key"
+description = "WooCommerce REST API consumer key"
+# Always `ck_` followed by exactly 40 lowercase hex characters.
+regex = '''\bck_[0-9a-f]{40}\b'''
+keywords = ["ck_"]
+entropy = 3.0
+
+[[rules]]
+id = "wpheka-woocommerce-consumer-secret"
+description = "WooCommerce REST API consumer secret"
+regex = '''\bcs_[0-9a-f]{40}\b'''
+keywords = ["cs_"]
+entropy = 3.0
