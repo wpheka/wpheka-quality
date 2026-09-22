@@ -87,7 +87,8 @@ Options:
 Checks: ${ALL_CHECKS}
 
 Environment overrides:
-  WPHEKA_CODERABBIT_MODE=uncommitted|base    WPHEKA_CODERABBIT_BASE=<ref>
+  WPHEKA_CODERABBIT_MODE=uncommitted|base|base-commit
+  WPHEKA_CODERABBIT_BASE=<ref>               WPHEKA_CODERABBIT_BASE_COMMIT=<sha>
   WPHEKA_PHPCS_STANDARD=<ruleset>            WPHEKA_TIMEOUT_DEFAULT=<seconds>
   WPHEKA_PHPCS_MEMORY_LIMIT=<php limit>      (default 1G; phpcs exhausts 128M on large trees)
   WPHEKA_SEMGREP_CONFIG=<ruleset|path|url>   WPHEKA_WP_PATH=<wordpress root>
@@ -1478,8 +1479,31 @@ if check_enabled coderabbit; then
           run_check "coderabbit" "$CR_BIN review --agent --base '$CR_BASE'" "0" "" "$CR_UNAVAILABLE" "review limit reached; nothing was reviewed (the free tier allows 3 per hour)"
         fi
         ;;
+      base-commit)
+        # Diff against a specific commit rather than a branch tip.
+        #
+        # A rotation asks "what has changed since we last looked here", and the
+        # answer is a commit, not a branch: on a repository whose HEAD *is*
+        # main, `--base main` diffs nothing and the review reads clean because
+        # it saw nothing. Reviewing the whole history instead re-reports work
+        # already seen and runs into the free tier's 150-file ceiling.
+        CR_BASE_COMMIT="${WPHEKA_CODERABBIT_BASE_COMMIT:-}"
+        if [[ -z "$CR_BASE_COMMIT" ]]; then
+          skip "coderabbit" "no base commit given (set WPHEKA_CODERABBIT_BASE_COMMIT)"
+        elif [[ ! "$CR_BASE_COMMIT" =~ ^[A-Za-z0-9._/~^-]+$ ]]; then
+          skip "coderabbit" "unsafe base commit: $CR_BASE_COMMIT"
+        elif ! git -C "$REPO" rev-parse --verify "$CR_BASE_COMMIT" >/dev/null 2>&1; then
+          skip "coderabbit" "base commit not found: $CR_BASE_COMMIT"
+        elif [[ -z "$(git -C "$REPO" diff --name-only "$CR_BASE_COMMIT" HEAD 2>/dev/null)" ]]; then
+          # Nothing changed since that commit. Saying so is the honest result;
+          # spending one of three hourly reviews to be told the same is not.
+          skip "coderabbit" "no changes since $CR_BASE_COMMIT"
+        else
+          run_check "coderabbit" "$CR_BIN review --agent --base-commit '$CR_BASE_COMMIT'" "0" "" "$CR_UNAVAILABLE" "review limit reached; nothing was reviewed (the free tier allows 3 per hour)"
+        fi
+        ;;
       *)
-        skip "coderabbit" "invalid WPHEKA_CODERABBIT_MODE '$CR_MODE' (use uncommitted or base)"
+        skip "coderabbit" "invalid WPHEKA_CODERABBIT_MODE '$CR_MODE' (use uncommitted, base or base-commit)"
         ;;
     esac
     # CodeRabbit is rate limited; surface that instead of reporting a bare failure.

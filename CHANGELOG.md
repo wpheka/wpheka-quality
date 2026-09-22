@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.7.0
+
+### Added
+
+- **`WPHEKA_CODERABBIT_MODE=base-commit`, for reviewing against a commit rather
+  than a branch.** The existing `base` mode diffs against a branch tip, which is
+  the wrong question for anything that reviews repeatedly: on a repository whose
+  HEAD *is* `main`, a diff against `main` is empty, and the review comes back
+  clean because it saw nothing at all.
+
+  What a rotation actually asks is "what has changed since we last looked here",
+  and that is a commit. `WPHEKA_CODERABBIT_BASE_COMMIT` names it, and the check
+  runs `cr review --agent --base-commit`. Reviewing the whole history instead
+  would re-report work already seen and run into the free tier's 150-file
+  ceiling.
+
+  The mode refuses before spending anything when there is nothing to review: an
+  absent or unparseable ref, a commit that no longer exists, or a diff that is
+  empty are each recorded as `SKIPPED` with the reason. The free tier allows
+  three reviews an hour, rolling and shared across every repository, and a
+  review killed halfway still costs one — so being told "nothing changed" is not
+  worth a slot.
+
 ## 1.6.0
 
 ### Added
