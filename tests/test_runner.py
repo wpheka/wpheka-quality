@@ -9,6 +9,7 @@ Run:  python3 tests/test_runner.py            (all)
       python3 tests/test_runner.py -k syntax  (subset)
 """
 
+import importlib.util
 import json
 import os
 import pathlib
@@ -748,6 +749,108 @@ class TestCli(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_PHP and HAVE_GIT, "php and git are required")
+class TestDeprecationScanner(unittest.TestCase):
+    """The scanner behind the `deprecations` check.
+
+    A scanner that reports nothing is indistinguishable from a broken one, which
+    is how a default gitleaks ruleset once scanned a repository holding a live
+    key pair and reported no leaks. So these plant known-deprecated calls and
+    assert they are found, alongside the shapes that merely look like them.
+    """
+
+    WP_ROOT = "/Applications/MAMP/htdocs/wpheka-plugins"
+
+    def setUp(self):
+        self.scanner = ROOT_DIR / "bin" / "scan-deprecations.py"
+        spec = importlib.util.spec_from_file_location("scan_deprecations", self.scanner)
+        self.sd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.sd)
+        corpus, _ = self.sd.build_corpus(self.WP_ROOT)
+        if not corpus:
+            self.skipTest("no WordPress install to build a corpus from")
+        self.corpus = corpus
+
+    def scan(self, php):
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        (tmp / "t.php").write_text(php)
+        out = tmp / "out.json"
+        self.sd.main(["--repo", str(tmp), "--wordpress-root", self.WP_ROOT,
+                      "--out", str(out)])
+        return json.loads(out.read_text())
+
+    def test_the_corpus_covers_both_projects(self):
+        projects = {entry["project"] for entry in self.corpus.values()}
+        self.assertEqual(projects, {"WordPress", "WooCommerce"})
+        # WooCommerce names the function explicitly 23 times and uses
+        # __FUNCTION__ the other 83. Matching one form found a fifth of them.
+        woo = [n for n, e in self.corpus.items() if e["project"] == "WooCommerce"]
+        self.assertGreater(len(woo), 50, "only %d WooCommerce entries" % len(woo))
+
+    def test_a_deprecated_call_is_found_with_its_version_and_replacement(self):
+        findings = self.scan("<?php\n$m = get_woocommerce_term_meta( 1, 'x' );\n")
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["line"], 2)
+        self.assertIn("WooCommerce 3.6", findings[0]["message"])
+        self.assertIn("get_term_meta", findings[0]["message"])
+
+    def test_a_definition_is_not_a_call(self):
+        # `public function get_settings(...)` was reported as a call to the
+        # WordPress function of that name: three findings on the real portfolio,
+        # all three wrong.
+        findings = self.scan(
+            "<?php\nclass A {\n    public function get_settings( $f ) { return $f; }\n}\n")
+        self.assertEqual(findings, [])
+
+    def test_a_method_call_is_not_a_function_call(self):
+        findings = self.scan(
+            "<?php\nclass A {\n    function run() { return $this->get_settings( 'x' ); }\n"
+            "    static function s() { return self::get_settings( 'y' ); }\n}\n")
+        self.assertEqual(findings, [])
+
+    def test_a_method_of_the_same_name_does_not_hide_a_real_call(self):
+        # The inverse mistake, and the more dangerous one: treating any defined
+        # name as shadowing meant a file defining a get_settings() method
+        # swallowed a genuine call to WordPress's deprecated function. Three
+        # plugins here define exactly that method.
+        findings = self.scan(
+            "<?php\n$v = get_settings( 'blogname' );\n"
+            "class A {\n    public function get_settings( $f ) { return $f; }\n}\n")
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["line"], 2)
+
+    def test_comments_and_strings_are_not_code(self):
+        findings = self.scan(
+            "<?php\n// get_woocommerce_term_meta( 1, 'x' )\n"
+            "/* woocommerce_get_page_id( 'shop' ) */\n"
+            "$s = \"get_woocommerce_term_meta( 1, 'x' )\";\n"
+            "# woocommerce_get_page_id( 'shop' )\n")
+        self.assertEqual(findings, [])
+
+    def test_line_numbers_survive_comment_stripping(self):
+        findings = self.scan(
+            "<?php\n/* a\n   multi\n   line\n   comment */\n"
+            "$m = get_woocommerce_term_meta( 1, 'x' );\n")
+        self.assertEqual(findings[0]["line"], 6)
+
+    def test_no_corpus_is_an_error_not_an_empty_result(self):
+        # Nothing compared is not the same as nothing wrong.
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        (tmp / "t.php").write_text("<?php\n")
+        empty = pathlib.Path(tempfile.mkdtemp())
+        code = self.sd.main(["--repo", str(tmp), "--wordpress-root", str(empty)])
+        self.assertEqual(code, 2)
+
+    def test_excluded_paths_are_not_scanned(self):
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        (tmp / "vendor").mkdir()
+        (tmp / "vendor" / "lib.php").write_text(
+            "<?php\n$m = get_woocommerce_term_meta( 1, 'x' );\n")
+        out = tmp / "out.json"
+        self.sd.main(["--repo", str(tmp), "--wordpress-root", self.WP_ROOT,
+                      "--out", str(out), "--exclude", "vendor"])
+        self.assertEqual(json.loads(out.read_text()), [])
+
+
 class TestIntegration(unittest.TestCase):
     def audit(self, repo, extra=()):
         out = pathlib.Path(tempfile.mkdtemp())
@@ -865,6 +968,37 @@ class TestIntegration(unittest.TestCase):
             self.audit(repo, ["--skip=phpcs"])
             self.assertFalse(marker.exists(),
                              "a repository config must never execute shell during config load")
+
+    def test_semgrep_without_a_network_is_skipped_not_failed(self):
+        # A registry ruleset has to be downloaded before anything can be scanned.
+        # Offline, semgrep spends about 100 seconds on DNS timeouts then exits 2
+        # having written no report and, under --quiet, no output whatsoever. That
+        # was recorded FAIL, which reads as "found problems" rather than "never
+        # ran" -- and on a real portfolio it removed a security scanner from
+        # seven repositories in one night while the finding total simply dropped.
+        if shutil.which("semgrep") is None:
+            self.skipTest("semgrep is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = pathlib.Path(tmp)
+            (repo / "t.php").write_text("<?php\n$x = $_GET['a'];\necho $x;\n")
+            (repo / ".wpheka-quality.yml").write_text(
+                "checks:\n  semgrep: true\n")
+            out = pathlib.Path(tempfile.mkdtemp())
+            # A proxy nothing is listening on: refused immediately, so the test
+            # does not wait out a real DNS timeout.
+            env = dict(os.environ, HTTPS_PROXY="http://127.0.0.1:9",
+                       HTTP_PROXY="http://127.0.0.1:9")
+            run([RUNNER, "--repo", repo, "--output-dir", out, "--no-color",
+                 "--quiet", "--only", "semgrep"], env=env)
+            rows = {}
+            for line in (out / "results.tsv").read_text().splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 5:
+                    rows[parts[0]] = (parts[1], parts[4])
+            status, detail = rows.get("semgrep", ("MISSING", ""))
+            self.assertEqual(status, "SKIPPED",
+                             "offline semgrep recorded %s, not SKIPPED" % status)
+            self.assertIn("unreachable", detail)
 
     def test_skip_reasons_are_explicit_for_every_skipped_check(self):
         with tempfile.TemporaryDirectory() as tmp:

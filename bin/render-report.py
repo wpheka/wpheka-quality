@@ -359,6 +359,10 @@ def parse_url_headers(raw_dir, repo):
     return parse_simple_findings(raw_dir, repo, "url-headers.json", "url_headers")
 
 
+def parse_deprecations(raw_dir, repo):
+    return parse_simple_findings(raw_dir, repo, "deprecations.json", "deprecations")
+
+
 # CodeRabbit prefixes every agent-mode instruction with the same prompt-injection
 # guard. It is identical on every finding, so it carries no information and would
 # otherwise dominate both the message and the fingerprint it is hashed into.
@@ -549,6 +553,7 @@ PARSERS = (
     parse_phpunit,
     parse_i18n_pot,
     parse_url_headers,
+    parse_deprecations,
     parse_coderabbit,
 )
 

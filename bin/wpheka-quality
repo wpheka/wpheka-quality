@@ -46,7 +46,7 @@ ONLY_CHECKS=""
 SKIP_CHECKS=""
 JOBS=""
 
-ALL_CHECKS="php_syntax git_diff_check phpcs phpstan phpunit composer_validate composer_audit semgrep gitleaks plugin_check i18n_pot url_headers npm_lint npm_test coderabbit"
+ALL_CHECKS="php_syntax git_diff_check phpcs phpstan phpunit composer_validate composer_audit semgrep gitleaks plugin_check deprecations i18n_pot url_headers npm_lint npm_test coderabbit"
 
 [[ -t 1 ]] || COLOR=0
 
@@ -325,6 +325,20 @@ check_enabled() {
 check_command() {
   local var="WPHEKA_CMD_$(echo "$1" | tr '[:lower:]' '[:upper:]')"
   eval "printf '%s' \"\${$var:-}\""
+}
+
+# Can semgrep's rule registry be reached? Five seconds, and a failure means
+# "could not tell", never "the code is fine" -- the same rule the url_headers
+# check follows.
+semgrep_registry_reachable() {
+  python3 - <<'PYSEM' >/dev/null 2>&1
+import sys
+import urllib.request
+try:
+    urllib.request.urlopen("https://semgrep.dev/", timeout=5)
+except Exception:
+    sys.exit(1)
+PYSEM
 }
 
 timeout_for() {
@@ -1056,9 +1070,28 @@ if check_enabled semgrep; then
     SEMGREP_CFG="${WPHEKA_SEMGREP_CONFIG:-p/php}"
     [[ -f "$REPO/.semgrep.yml" ]] && SEMGREP_CFG=".semgrep.yml"
     [[ -f "$REPO/.semgrep.yaml" ]] && SEMGREP_CFG=".semgrep.yaml"
-    run_check "semgrep" \
-      "semgrep scan --config '$SEMGREP_CFG' --quiet --json --output '$RAW/semgrep.json' --metrics=off" \
-      "0,1"
+
+    # A registry ruleset has to be downloaded before anything can be scanned, so
+    # without a network there is nothing to scan with. Offline, semgrep spends
+    # about 100 seconds on DNS timeouts and then exits 2 having written no
+    # report and -- because of --quiet -- no output at all. That was recorded as
+    # FAIL, which reads as "found problems" rather than "never ran": on a real
+    # portfolio it silently removed a security scanner from seven repositories
+    # in one night while the finding total simply went down.
+    #
+    # A local ruleset needs no network, so it is never probed.
+    SEMGREP_REMOTE=0
+    case "$SEMGREP_CFG" in
+      p/*|r/*|s/*|http://*|https://*) SEMGREP_REMOTE=1 ;;
+    esac
+
+    if [[ $SEMGREP_REMOTE -eq 1 ]] && ! semgrep_registry_reachable; then
+      skip "semgrep" "semgrep registry unreachable; the '$SEMGREP_CFG' ruleset could not be fetched"
+    else
+      run_check "semgrep" \
+        "semgrep scan --config '$SEMGREP_CFG' --quiet --json --output '$RAW/semgrep.json' --metrics=off" \
+        "0,1"
+    fi
   else
     skip "semgrep" "semgrep not installed"
   fi
@@ -1223,6 +1256,53 @@ PYPC
   fi
 else
   skip "plugin_check" "disabled in configuration"
+fi
+
+# ---------------------------------------------------------------------------
+# 9b. Deprecated WordPress and WooCommerce functions
+#
+# The gap docs/wordpress-notes.md names under what the other checks miss: a
+# deprecated call is valid PHP, it parses, and it passes every sniff, right up
+# to the release that removes it. On a payment gateway that release is a fatal
+# error during checkout.
+#
+# The corpus is built from the WordPress and WooCommerce installed on this
+# machine rather than a list shipped here. A hardcoded list is wrong the day
+# after it is written; reading the installed copies means it refreshes itself
+# and describes the versions actually in use.
+# ---------------------------------------------------------------------------
+if check_enabled deprecations; then
+  DEP_SCANNER="$ROOT/bin/scan-deprecations.py"
+  DEP_WP_PATH="${WPHEKA_WP_PATH:-}"
+  [[ -n "$DEP_WP_PATH" ]] || DEP_WP_PATH="$(find_wp_root "$REPO" || true)"
+
+  if [[ ! -f "$DEP_SCANNER" ]]; then
+    skip "deprecations" "scan-deprecations.py not found beside the runner"
+  elif [[ -z "$DEP_WP_PATH" ]]; then
+    skip "deprecations" "no WordPress installation found to build the corpus from (set WPHEKA_WP_PATH)"
+  else
+    DEP_EXCLUDE_ARGS=""
+    if [[ -n "${WPHEKA_CFG_EXCLUDE:-}" ]]; then
+      DEP_EXCLUDE_ARGS="$(python3 <<'PYDEP'
+import os
+import shlex
+out = []
+for raw in os.environ.get("WPHEKA_CFG_EXCLUDE", "").splitlines():
+    entry = raw.strip().rstrip("/")
+    if entry:
+        out.append("--exclude " + shlex.quote(entry))
+print(" ".join(out))
+PYDEP
+)"
+    fi
+    # 0 = nothing found, 1 = findings, 2 = no corpus. The last is not a clean
+    # result: nothing was compared against anything.
+    run_check "deprecations" \
+      "python3 '$DEP_SCANNER' --repo . --wordpress-root '$DEP_WP_PATH' --out '$RAW/deprecations.json' $DEP_EXCLUDE_ARGS" \
+      "0,1" "2"
+  fi
+else
+  skip "deprecations" "disabled in configuration"
 fi
 
 # ---------------------------------------------------------------------------

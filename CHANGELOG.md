@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.6.0
+
+### Added
+
+- **`deprecations` — the category the other checks cannot see.** A deprecated
+  call is valid PHP. It parses, it passes every sniff, and it keeps working
+  right up to the release that removes it. `docs/wordpress-notes.md` has listed
+  "Deprecated APIs" under what these checks do not catch since the beginning;
+  on a payment gateway running on live stores, the release that finally removes
+  one is a fatal error during checkout.
+
+  The corpus is built from the WordPress and WooCommerce **installed on this
+  machine**, not from a list shipped here. A hardcoded list is wrong the day
+  after it is written; reading the installed copies means it refreshes itself
+  when they update and describes the versions actually in use. It currently
+  yields 429 functions: 327 from WordPress across four files, 102 from
+  WooCommerce.
+
+  Both projects mark a deprecation two ways and both use both — WooCommerce
+  names the function explicitly 23 times and uses `__FUNCTION__` the other 83 —
+  so reading one form finds a fifth of them. Because the marker sits in the
+  deprecated function itself, the version and the suggested replacement come out
+  with the name, which is what makes a finding actionable rather than merely
+  true.
+
+  Two mistakes are worth recording because the scanner made both before it
+  worked. A method definition is not a call: `public function get_settings(...)`
+  was reported as a call to the WordPress function of that name, three times on
+  a real portfolio, all three wrong. And a method does **not** shadow a global
+  function: treating any defined name as shadowing meant a file defining a
+  `get_settings()` method silently swallowed a genuine call to the deprecated
+  WordPress one. Three plugins here define exactly that method.
+
+### Fixed
+
+- **semgrep without a network was recorded as a failure, not a skip.** A
+  registry ruleset has to be downloaded before anything can be scanned, so
+  offline there is nothing to scan with. semgrep then spends about 100 seconds
+  on DNS timeouts and exits 2 having written no report and — under `--quiet` —
+  no output whatsoever.
+
+  That was recorded `FAIL`, which reads as "found problems" rather than "never
+  ran". Observed in production: a laptop woke, the scheduled run fired before
+  the network was up, and semgrep contributed nothing to seven repositories in
+  one night while the finding total simply went down and the report looked
+  healthier than the day before.
+
+  A remote ruleset is now probed first, with five seconds and the same rule
+  `url_headers` follows: a failure means "could not tell", never "the code is
+  fine". The check skips with a reason instead. A local ruleset needs no network
+  and is never probed. As a side effect an offline run costs 2 seconds rather
+  than 103.
+
 ## 1.5.0
 
 Four defects with one shape: a check reported success while no evidence had been
