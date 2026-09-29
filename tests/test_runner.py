@@ -563,6 +563,101 @@ class TestRenderer(unittest.TestCase):
 # CLI behaviour
 # ---------------------------------------------------------------------------
 
+def engine_results(repo, only, out_dir):
+    """Run one check and return {check: (status, detail)} from results.tsv."""
+    res = run([RUNNER, "--repo", str(repo), "--only", only, "--output-dir", str(out_dir),
+               "--no-color", "--quiet"])
+    rows = {}
+    tsv = pathlib.Path(out_dir) / "results.tsv"
+    if tsv.is_file():
+        for line in tsv.read_text().splitlines():
+            cols = line.split("\t")
+            if len(cols) >= 2:
+                rows[cols[0]] = (cols[1], cols[4] if len(cols) > 4 else "")
+    return res, rows
+
+
+PHPUNIT_XML = '<?xml version="1.0"?>\n<phpunit bootstrap="%s"><testsuites/></phpunit>\n'
+
+
+@unittest.skipUnless(HAVE_GIT and shutil.which("phpunit"), "needs git and a global phpunit")
+class TestPhpunitWithoutVendor(unittest.TestCase):
+    """A checkout with no vendor/ -- every Sentinel worktree -- must not report FAIL.
+
+    The regression: Moneris Pro's bootstrap requires vendor/autoload.php, the
+    engine fell back to a global phpunit, and the bootstrap died. That was
+    recorded as FAIL every night for a suite that never started.
+    """
+
+    def repo(self, tmp, bootstrap_attr, bootstrap_body):
+        return make_git_repo(pathlib.Path(tmp) / "plug", {
+            "plugin.php": "<?php\n",
+            "phpunit.xml": PHPUNIT_XML % bootstrap_attr,
+            "tests/bootstrap.php": bootstrap_body,
+        })
+
+    def test_a_bootstrap_that_loads_vendor_is_skipped_not_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.repo(tmp, "tests/bootstrap.php",
+                             "<?php\nrequire_once __DIR__ . '/../vendor/autoload.php';\n")
+            _, rows = engine_results(repo, "phpunit", pathlib.Path(tmp) / "out")
+            status, detail = rows["phpunit"]
+            self.assertEqual(status, "SKIPPED")
+            self.assertIn("vendor/ absent", detail)
+
+    def test_a_vendor_autoloader_named_directly_as_bootstrap_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.repo(tmp, "vendor/autoload.php", "<?php\n")
+            _, rows = engine_results(repo, "phpunit", pathlib.Path(tmp) / "out")
+            self.assertEqual(rows["phpunit"][0], "SKIPPED")
+
+    def test_a_self_contained_bootstrap_still_runs(self):
+        # The global-phpunit fallback exists for repositories that need nothing
+        # from Composer; the skip must not swallow them.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.repo(tmp, "tests/bootstrap.php", "<?php\n// no autoloader\n")
+            _, rows = engine_results(repo, "phpunit", pathlib.Path(tmp) / "out")
+            status, detail = rows["phpunit"]
+            self.assertNotEqual(status, "SKIPPED", detail)
+            self.assertNotIn("vendor/ absent", detail)
+
+    def test_with_vendor_present_the_suite_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.repo(tmp, "tests/bootstrap.php",
+                             "<?php\nrequire_once __DIR__ . '/../vendor/autoload.php';\n")
+            (repo / "vendor").mkdir()
+            (repo / "vendor" / "autoload.php").write_text("<?php\n")
+            _, rows = engine_results(repo, "phpunit", pathlib.Path(tmp) / "out")
+            self.assertNotIn("vendor/ absent", rows["phpunit"][1])
+
+
+@unittest.skipUnless(HAVE_GIT and shutil.which("composer"), "needs git and composer")
+class TestComposerAuditWithoutVendor(unittest.TestCase):
+    def test_the_lock_file_is_audited_without_an_install(self):
+        # Without --locked, composer exits 1 with "No installed packages found"
+        # in any checkout that never ran composer install. It only does so when
+        # composer.json actually requires something: with nothing required it
+        # prints "No packages - skipping audit" and exits 0, so a fixture with an
+        # empty require passes with or without the fix and proves nothing.
+        lock = json.dumps({"content-hash": "0" * 32, "packages-dev": [],
+                           "packages": [{"name": "psr/log", "version": "3.0.0",
+                                         "type": "library"}]})
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_git_repo(pathlib.Path(tmp) / "plug", {
+                "plugin.php": "<?php\n",
+                "composer.json": '{"name": "t/plug", "require": {"psr/log": "^3.0"}}\n',
+                "composer.lock": lock,
+            })
+            _, rows = engine_results(repo, "composer_audit", pathlib.Path(tmp) / "out")
+            status, detail = rows["composer_audit"]
+            log = pathlib.Path(tmp) / "out" / "tool-results" / "composer_audit.log"
+            self.assertTrue(log.is_file(), "composer_audit left no log")
+            self.assertNotIn("No installed packages", log.read_text())
+            # The audit itself needs packagist; offline it fails for that reason
+            # instead, which is a real outcome and not this regression.
+            self.assertIn(status, ("PASS", "FAIL"), detail)
+
+
 class TestCli(unittest.TestCase):
     def test_version_and_help(self):
         self.assertEqual(run([RUNNER, "--version"]).returncode, 0)

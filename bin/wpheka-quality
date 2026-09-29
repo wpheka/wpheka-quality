@@ -1007,6 +1007,42 @@ fi
 # ---------------------------------------------------------------------------
 # 5. PHPUnit
 # ---------------------------------------------------------------------------
+# True when the phpunit configuration's bootstrap is, or loads, Composer's
+# autoloader. A self-contained bootstrap still runs without vendor/, so the
+# global-phpunit fallback keeps working for repositories that need nothing else.
+phpunit_bootstrap_needs_vendor() {
+  python3 - "$REPO" <<'PYPU'
+import os
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+repo = sys.argv[1]
+for name in ("phpunit.xml", "phpunit.xml.dist"):
+    config = os.path.join(repo, name)
+    if os.path.isfile(config):
+        break
+else:
+    sys.exit(1)
+
+try:
+    bootstrap = (ET.parse(config).getroot().get("bootstrap") or "").strip()
+except (ET.ParseError, OSError):
+    sys.exit(1)
+if not bootstrap:
+    sys.exit(1)
+if re.search(r"(^|/)vendor/", bootstrap):
+    sys.exit(0)
+
+path = os.path.join(repo, bootstrap)
+try:
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        sys.exit(0 if "vendor/autoload.php" in fh.read() else 1)
+except OSError:
+    sys.exit(1)
+PYPU
+}
+
 if check_enabled phpunit; then
   PHPUNIT_OVERRIDE="$(check_command phpunit)"
   PHPUNIT_BIN=""
@@ -1022,6 +1058,12 @@ if check_enabled phpunit; then
     skip "phpunit" "phpunit not installed"
   elif [[ ! -f "$REPO/phpunit.xml" && ! -f "$REPO/phpunit.xml.dist" ]]; then
     skip "phpunit" "phpunit installed but no phpunit.xml/.dist configuration"
+  elif [[ ! -f "$REPO/vendor/autoload.php" ]] && phpunit_bootstrap_needs_vendor; then
+    # The same rule as npm_lint/npm_test and node_modules. Running anyway falls
+    # back to a global phpunit whose bootstrap then dies on the missing
+    # autoloader, which reported FAIL -- "the tests are broken" -- every night
+    # for a suite that was never started.
+    skip "phpunit" "vendor/ absent; the engine does not install dependencies (the phpunit bootstrap requires vendor/autoload.php)"
   else
     run_check "phpunit" "$PHPUNIT_BIN --log-junit '$RAW/phpunit-junit.xml'"
   fi
@@ -1047,8 +1089,13 @@ else
 
   if check_enabled composer_audit; then
     if [[ -f "$REPO/composer.lock" ]]; then
+      # --locked audits the lock file rather than vendor/. Without it composer
+      # exits 1 with "No installed packages found" in any checkout that has not
+      # run composer install -- every Sentinel worktree -- so the check failed
+      # nightly having audited nothing. The lock is also what gets installed, so
+      # it is the right thing to audit even where vendor/ exists.
       run_check "composer_audit" \
-        "composer audit --no-interaction --format=json > '$RAW/composer-audit.json' 2>'$RAW/composer-audit.stderr.log'; rc=\$?; cat '$RAW/composer-audit.stderr.log'; exit \$rc"
+        "composer audit --locked --no-interaction --format=json > '$RAW/composer-audit.json' 2>'$RAW/composer-audit.stderr.log'; rc=\$?; cat '$RAW/composer-audit.stderr.log'; exit \$rc"
     else
       skip "composer_audit" "no composer.lock to audit"
     fi
@@ -1219,25 +1266,59 @@ if check_enabled plugin_check; then
       # wpheka-request-for-quote: six DirectDB findings from bundled
       # Database/Repository.php and Schema.php, code reviewed in its own repo.
       #
-      # --exclude-directories takes bare directory names, so entries naming a
-      # file, or a path with a separator in it, are skipped rather than passed
-      # through as something plugin-check would silently not match.
+      # Two options are needed, not one. --exclude-directories takes BARE
+      # directory names, so a nested path cannot be expressed through it.
+      # --exclude-files takes a path relative to the plugin root, which is how a
+      # vendored file gets named: both Moneris plugins exclude
+      # includes/wpheka-moneris-api/[src/]mpgClasses.php, and routing those to
+      # --exclude-directories silently dropped them -- 12 findings reported
+      # against Moneris's own library on every run, against a config that had
+      # already excluded it.
       PC_EXCLUDE_ARG=""
       if [[ -n "${WPHEKA_CFG_EXCLUDE:-}" ]]; then
-        PC_EXCLUDE_DIRS="$(python3 <<'PYPC'
+        PC_EXCLUDE_SPLIT="$(python3 <<'PYPC'
 import os
-seen, out = set(), []
+
+seen_dirs, dirs = set(), []
+seen_files, files = set(), []
+
 for raw in os.environ.get("WPHEKA_CFG_EXCLUDE", "").splitlines():
-    entry = raw.strip().rstrip("/")
-    if not entry or "," in entry or "/" in entry or entry in seen:
+    stripped = raw.strip()
+    entry = stripped.rstrip("/")
+    # A comma would corrupt the comma-separated option value.
+    if not entry or "," in entry:
         continue
-    seen.add(entry)
-    out.append(entry)
-print(",".join(out))
+    last = entry.rsplit("/", 1)[-1]
+    # A trailing slash always means a directory. Otherwise a dot in the final
+    # segment marks a file (mpgClasses.php) rather than a directory. The dot is
+    # looked for past position 0 so a dot-directory (.wpheka-quality-reports)
+    # is not mistaken for a file.
+    is_file = ("." in last[1:]) and not stripped.endswith("/")
+    if is_file:
+        if entry not in seen_files:
+            seen_files.add(entry)
+            files.append(entry)
+    else:
+        # --exclude-directories matches a BARE directory name anywhere in the
+        # tree, so a nested path is represented by its final segment. Dropping
+        # the entry instead would silently ignore an exclusion the repository
+        # had explicitly asked for -- that is what hid the bundled
+        # api-manager-php-library findings under includes/admin/license/.
+        if last not in seen_dirs:
+            seen_dirs.add(last)
+            dirs.append(last)
+
+print(",".join(dirs))
+print(",".join(files))
 PYPC
 )"
+        PC_EXCLUDE_DIRS="$(printf '%s\n' "$PC_EXCLUDE_SPLIT" | sed -n '1p')"
+        PC_EXCLUDE_FILES="$(printf '%s\n' "$PC_EXCLUDE_SPLIT" | sed -n '2p')"
         if [[ -n "$PC_EXCLUDE_DIRS" ]]; then
           PC_EXCLUDE_ARG="--exclude-directories='$PC_EXCLUDE_DIRS'"
+        fi
+        if [[ -n "$PC_EXCLUDE_FILES" ]]; then
+          PC_EXCLUDE_ARG="$PC_EXCLUDE_ARG --exclude-files='$PC_EXCLUDE_FILES'"
         fi
       fi
 
@@ -1249,7 +1330,7 @@ PYPC
       run_check "plugin_check" \
         "wp --path='$WP_PATH' plugin check . $PC_SLUG_ARG $PC_EXCLUDE_ARG --format=json > '$RAW/plugin-check.json' 2>'$RAW/plugin-check.stderr.log'; rc=\$?; \
          if [ \$rc -ne 0 ] && grep -q 'Parameter errors:' '$RAW/plugin-check.stderr.log'; then \
-           echo 'plugin-check rejected an option; retrying with neither --slug nor --exclude-directories' >&2; \
+           echo 'plugin-check rejected an option; retrying with neither --slug nor the exclude options' >&2; \
            wp --path='$WP_PATH' plugin check . --format=json > '$RAW/plugin-check.json' 2>'$RAW/plugin-check.stderr.log'; rc=\$?; \
          fi; cat '$RAW/plugin-check.stderr.log'; exit \$rc" \
         "0"
