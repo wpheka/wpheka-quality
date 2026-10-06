@@ -66,4 +66,25 @@
         <!-- Placement of PHP tags within markup. -->
         <exclude name="Squiz.PHP.EmbeddedPhp"/>
     </rule>
+
+    <!--
+        WooCommerce registers these capabilities on install; the sniff only knows
+        core's, so every current_user_can( 'manage_woocommerce' ) was reported as
+        a misspelling. Listing them keeps the sniff on for every capability that
+        really is unknown.
+    -->
+    <rule ref="WordPress.WP.Capabilities">
+        <properties>
+            <property name="custom_capabilities" type="array">
+                <element value="manage_woocommerce"/>
+                <element value="view_woocommerce_reports"/>
+                <element value="edit_shop_orders"/>
+                <element value="read_shop_order"/>
+                <element value="edit_shop_order"/>
+                <element value="delete_shop_order"/>
+                <element value="edit_products"/>
+                <element value="edit_product"/>
+            </property>
+        </properties>
+    </rule>
 </ruleset>
